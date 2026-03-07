@@ -1,7 +1,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Routes, Route, useNavigate, Navigate } from "react-router-dom";
 import POS from "./pages/POS.jsx";
-import Purchase from "./pages/Purchase.jsx";
+import Purchase from "./pages/purchase.jsx";
 import Sales from "./pages/sales.jsx";
 import Inventory from "./pages/inventory.jsx";
 import Accounting from "./pages/accounting.jsx";
