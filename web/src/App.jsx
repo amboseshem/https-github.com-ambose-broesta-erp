@@ -1,6 +1,6 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { Routes, Route, useNavigate, Navigate } from "react-router-dom";
-import POS from "./pages/POS.jsx";
+import POS from "./pages/pos.jsx";
 import Purchase from "./pages/purchase.jsx";
 import Sales from "./pages/sales.jsx";
 import Inventory from "./pages/inventory.jsx";
@@ -8,7 +8,7 @@ import Accounting from "./pages/accounting.jsx";
 import Barcode from "./pages/barcode.jsx";
 import Website from "./pages/website.jsx";
 import Company from "./pages/company.jsx";
-import PublicShop from "./pages/PublicShop.jsx";
+import PublicShop from "./pages/publicshop.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
 
