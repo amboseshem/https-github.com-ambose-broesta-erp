@@ -7,7 +7,7 @@ import Inventory from "./pages/inventory.jsx";
 import Accounting from "./pages/accounting.jsx";
 import Barcode from "./pages/barcode.jsx";
 import Website from "./pages/website.jsx";
-import Company from "./pages/Company.jsx";
+import Company from "./pages/company.jsx";
 import PublicShop from "./pages/PublicShop.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
