@@ -1,0 +1,10 @@
+* { box-sizing: border-box; }
+.lbl { display:block; font-size:12px; opacity:0.85; margin:10px 0 6px; }
+.inp { width:100%; padding:10px 12px; border:1px solid #ddd; border-radius:10px; outline:none; }
+.inp:focus { border-color:#0066ff; }
+.btn { padding:10px 14px; border:none; border-radius:10px; cursor:pointer; background:#eaeaea; }
+.btn.primary { background:#0066ff; color:#fff; }
+.grid2 { display:grid; grid-template-columns: 1fr 1fr; gap:12px; }
+@media (max-width: 700px) {
+  .grid2 { grid-template-columns: 1fr; }
+}
