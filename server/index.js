@@ -1,3 +1,4 @@
+import { pool } from "./db.js";
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
@@ -1770,5 +1771,8 @@ app.get("/website/orders", auth, (req, res) => {
 
   res.json({ ok: true, orders: rows });
 });
-const PORT = 8080;
-app.listen(PORT, () => console.log("✅ Server running on http://localhost:" + PORT));
+const PORT = process.env.PORT || 8080;
+
+app.listen(PORT, () => {
+  console.log("Server running on port " + PORT);
+});
