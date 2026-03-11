@@ -490,56 +490,6 @@ app.delete("/products/:id", auth, (req, res) => {
 // ==============================
 // CUSTOMERS
 // ==============================
-app.get("/customers", auth, (req, res) => {
-  const rows = db.prepare("SELECT * FROM customers ORDER BY id DESC").all();
-  res.json({ ok:true, customers: rows });
-});
-
-app.post("/customers", auth, (req, res) => {
-  const schema = z.object({
-    name: z.string().min(1),
-    phone: z.string().optional().default(""),
-    email: z.string().optional().default(""),
-    kra_pin: z.string().optional().default("")
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid input" });
-
-  const c = parsed.data;
-  db.prepare("INSERT INTO customers (name, phone, email, kra_pin) VALUES (?,?,?,?)")
-    .run(c.name.trim(), c.phone.trim(), c.email.trim(), c.kra_pin.trim());
-
-  res.json({ ok:true });
-});
-
-// ==============================
-// SUPPLIERS
-// ==============================
-app.get("/suppliers", auth, (req, res) => {
-  const rows = db.prepare("SELECT * FROM suppliers ORDER BY id DESC").all();
-  res.json({ ok:true, suppliers: rows });
-});
-
-app.post("/suppliers", auth, (req, res) => {
-  const schema = z.object({
-    name: z.string().min(1),
-    phone: z.string().optional().default(""),
-    email: z.string().optional().default(""),
-    kra_pin: z.string().optional().default("")
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid input" });
-
-  const s = parsed.data;
-  db.prepare("INSERT INTO suppliers (name, phone, email, kra_pin) VALUES (?,?,?,?)")
-    .run(s.name.trim(), s.phone.trim(), s.email.trim(), s.kra_pin.trim());
-
-  res.json({ ok:true });
-});
-
-// ==============================
-// POS COMPLETE SALE + RECEIPTS
-// ==============================
 app.post("/pos/complete-sale", auth, (req, res) => {
   const schema = z.object({
     items: z.array(z.object({
@@ -548,26 +498,44 @@ app.post("/pos/complete-sale", auth, (req, res) => {
       price: z.number().nonnegative()
     })).min(1),
     customer_id: z.number().nullable().optional(),
-    payment_mode: z.enum(["Cash","Mpesa","Bank","Cheque"]),
+    payment_mode: z.enum(["Cash","Mpesa","Bank","Cheque","Account","Credit"]),
     payment_ref: z.string().optional().default(""),
-    amount_paid: z.number().nonnegative()
+    amount_paid: z.number().nonnegative().optional().default(0)
   });
 
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid sale payload" });
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid sale payload" });
 
   const sale = parsed.data;
 
-  if (sale.payment_mode !== "Cash" && sale.payment_ref.trim().length < 2) {
-    return res.json({ ok:false, message:"Reference code required for " + sale.payment_mode });
+  if (["Mpesa", "Bank", "Cheque"].includes(sale.payment_mode) && sale.payment_ref.trim().length < 2) {
+    return res.json({ ok: false, message: "Reference code required for " + sale.payment_mode });
+  }
+
+  if (["Account", "Credit"].includes(sale.payment_mode) && !sale.customer_id) {
+    return res.json({ ok: false, message: "Choose a customer for Account or Credit sale" });
   }
 
   let total = 0;
   for (const it of sale.items) total += it.qty * it.price;
-  total = sum2(total);
+  total = Number(total.toFixed(2));
 
-  if (sale.amount_paid < total) return res.json({ ok:false, message:"Money less than total" });
-  const change_given = sum2(sale.amount_paid - total);
+  let amount_paid = Number(sale.amount_paid || 0);
+  let change_given = 0;
+
+  if (sale.payment_mode === "Cash") {
+    if (amount_paid < total) return res.json({ ok: false, message: "Money less than total" });
+    change_given = Number((amount_paid - total).toFixed(2));
+  } else if (["Mpesa", "Bank", "Cheque"].includes(sale.payment_mode)) {
+    amount_paid = total;
+    change_given = 0;
+  } else if (sale.payment_mode === "Account") {
+    amount_paid = total;
+    change_given = 0;
+  } else if (sale.payment_mode === "Credit") {
+    amount_paid = 0;
+    change_given = 0;
+  }
 
   const tx = db.transaction(() => {
     // stock check
@@ -577,17 +545,64 @@ app.post("/pos/complete-sale", auth, (req, res) => {
       if (Number(p.stock) < it.qty) throw new Error("Insufficient stock for " + p.name);
     }
 
+    // customer checks for Account/Credit
+    let customer = null;
+    if (sale.customer_id) {
+      customer = db.prepare("SELECT * FROM customers WHERE id=?").get(sale.customer_id);
+      if (!customer) throw new Error("Customer not found");
+    }
+
+    if (sale.payment_mode === "Account") {
+      if (!customer) throw new Error("Customer account required");
+      if (Number(customer.account_balance || 0) < total) {
+        throw new Error("Customer account balance is not enough");
+      }
+      db.prepare(`
+        UPDATE customers
+        SET account_balance = account_balance - ?
+        WHERE id=?
+      `).run(total, customer.id);
+    }
+
+    if (sale.payment_mode === "Credit") {
+      if (!customer) throw new Error("Customer required for credit sale");
+      if (!Number(customer.allow_credit || 0)) {
+        throw new Error("This customer is not allowed to buy on credit");
+      }
+
+      const available = Number(customer.credit_limit || 0) - Number(customer.credit_used || 0);
+      if (available < total) {
+        throw new Error("Credit limit exceeded. Available credit is " + available.toFixed(2));
+      }
+
+      db.prepare(`
+        UPDATE customers
+        SET credit_used = credit_used + ?
+        WHERE id=?
+      `).run(total, customer.id);
+    }
+
     const receipt_no = nextNo("receipt", "BR-");
     const ins = db.prepare(`
-      INSERT INTO pos_sales (receipt_no, customer_id, total, payment_mode, payment_ref, amount_paid, change_given)
+      INSERT INTO pos_sales (
+        receipt_no, customer_id, total, payment_mode, payment_ref, amount_paid, change_given
+      )
       VALUES (?,?,?,?,?,?,?)
-    `).run(receipt_no, sale.customer_id || null, total, sale.payment_mode, sale.payment_ref, sale.amount_paid, change_given);
+    `).run(
+      receipt_no,
+      sale.customer_id || null,
+      total,
+      sale.payment_mode,
+      sale.payment_ref,
+      amount_paid,
+      change_given
+    );
 
     const sale_id = ins.lastInsertRowid;
 
     for (const it of sale.items) {
       const p = db.prepare("SELECT id,name,barcode FROM products WHERE id=?").get(it.product_id);
-      const subtotal = sum2(it.qty * it.price);
+      const subtotal = Number((it.qty * it.price).toFixed(2));
 
       db.prepare(`
         INSERT INTO pos_sale_items (sale_id, product_id, name, barcode, qty, price, subtotal)
@@ -604,29 +619,6 @@ app.post("/pos/complete-sale", auth, (req, res) => {
       `).run(receipt_no, p.id, -Math.abs(it.qty));
     }
 
-    // accounting: record payment + journal entry (simple)
-    db.prepare(`
-      INSERT INTO payments (source, ref, mode, pay_ref, amount)
-      VALUES ('POS', ?, ?, ?, ?)
-    `).run(receipt_no, sale.payment_mode, sale.payment_ref, total);
-
-    // journals: SALES credit + mode debit (simple, later we improve)
-    db.prepare(`
-      INSERT INTO journal_entries (ref, journal_code, entry_type, amount, note)
-      VALUES (?, 'SALES', 'CREDIT', ?, 'POS Sale')
-    `).run(receipt_no, total);
-
-    const modeCode = sale.payment_mode === "Cash" ? "CASH"
-      : sale.payment_mode === "Mpesa" ? "MPESA"
-      : sale.payment_mode === "Bank" ? "BANK"
-      : "CASH";
-
-    db.prepare(`
-      INSERT INTO journal_entries (ref, journal_code, entry_type, amount, note)
-      VALUES (?, ?, 'DEBIT', ?, 'POS Payment')
-    `).run(receipt_no, modeCode, total);
-
-    // loyalty: 1 point per 100
     if (sale.customer_id) {
       const addPts = Math.floor(total / 100);
       if (addPts > 0) {
@@ -635,11 +627,14 @@ app.post("/pos/complete-sale", auth, (req, res) => {
       }
     }
 
-    return { sale_id, receipt_no, total, change_given };
+    return { sale_id, receipt_no, total, change_given, payment_mode: sale.payment_mode };
   });
 
-  try { return res.json({ ok:true, result: tx() }); }
-  catch(e){ return res.json({ ok:false, message:String(e.message||e) }); }
+  try {
+    return res.json({ ok: true, result: tx() });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
 });
 
 app.get("/pos/receipts", auth, (req, res) => {
@@ -1598,7 +1593,13 @@ CREATE TABLE IF NOT EXISTS website_order_items (
   FOREIGN KEY (product_id) REFERENCES products(id)
 );
 `);
-
+// ==============================
+// SAFE SCHEMA UPGRADES - PHASE A/B
+// ==============================
+try { db.prepare("ALTER TABLE customers ADD COLUMN account_balance REAL NOT NULL DEFAULT 0").run(); } catch {}
+try { db.prepare("ALTER TABLE customers ADD COLUMN credit_limit REAL NOT NULL DEFAULT 0").run(); } catch {}
+try { db.prepare("ALTER TABLE customers ADD COLUMN credit_used REAL NOT NULL DEFAULT 0").run(); } catch {}
+try { db.prepare("ALTER TABLE customers ADD COLUMN allow_credit INTEGER NOT NULL DEFAULT 0").run(); } catch {}
 try { db.prepare("ALTER TABLE products ADD COLUMN category_id INTEGER").run(); } catch {}
 try { db.prepare("ALTER TABLE products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''").run(); } catch {}
 
@@ -1771,6 +1772,118 @@ app.get("/website/orders", auth, (req, res) => {
 
   res.json({ ok: true, orders: rows });
 });
+
+// ==============================
+// PHASE A - CHANGE PASSWORD
+// ==============================
+app.post("/auth/change-password", auth, (req, res) => {
+  try {
+    const schema = z.object({
+      current_password: z.string().min(1),
+      new_password: z.string().min(4),
+      confirm_password: z.string().min(4),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
+
+    const { current_password, new_password, confirm_password } = parsed.data;
+    if (new_password !== confirm_password) {
+      return res.json({ ok: false, message: "New passwords do not match" });
+    }
+
+    const user = db.prepare("SELECT * FROM users WHERE username=?").get(req.user.username);
+    if (!user) return res.json({ ok: false, message: "User not found" });
+
+    const ok = bcrypt.compareSync(current_password, user.password_hash);
+    if (!ok) return res.json({ ok: false, message: "Current password is wrong" });
+
+    const newHash = bcrypt.hashSync(new_password, 10);
+    db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(newHash, user.id);
+
+    return res.json({ ok: true, message: "Password changed successfully" });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+// ==============================
+// PHASE B - CUSTOMER ACCOUNT / CREDIT
+// ==============================
+
+// Top up customer account
+app.post("/customers/:id/topup", auth, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const schema = z.object({
+      amount: z.coerce.number().positive(),
+      note: z.string().optional().default("Account Top-up"),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid top-up data" });
+
+    const customer = db.prepare("SELECT * FROM customers WHERE id=?").get(id);
+    if (!customer) return res.json({ ok: false, message: "Customer not found" });
+
+    db.prepare(`
+      UPDATE customers
+      SET account_balance = account_balance + ?
+      WHERE id=?
+    `).run(parsed.data.amount, id);
+
+    return res.json({ ok: true, message: "Customer account topped up" });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+// Update customer credit settings
+app.put("/customers/:id/credit-settings", auth, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const schema = z.object({
+      allow_credit: z.coerce.number().optional().default(0),
+      credit_limit: z.coerce.number().min(0).optional().default(0),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid credit settings" });
+
+    const customer = db.prepare("SELECT * FROM customers WHERE id=?").get(id);
+    if (!customer) return res.json({ ok: false, message: "Customer not found" });
+
+    db.prepare(`
+      UPDATE customers
+      SET allow_credit=?, credit_limit=?
+      WHERE id=?
+    `).run(parsed.data.allow_credit ? 1 : 0, parsed.data.credit_limit, id);
+
+    return res.json({ ok: true, message: "Credit settings updated" });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+// Customer account summary
+app.get("/customers/:id/account-summary", auth, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const customer = db.prepare(`
+      SELECT id, name, phone, email, kra_pin, loyalty_points,
+             account_balance, credit_limit, credit_used, allow_credit
+      FROM customers
+      WHERE id=?
+    `).get(id);
+
+    if (!customer) return res.json({ ok: false, message: "Customer not found" });
+
+    return res.json({ ok: true, customer });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
 const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, () => {

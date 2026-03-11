@@ -19,7 +19,6 @@ async function api(path, { method = "GET", body } = {}) {
     body: body ? JSON.stringify(body) : undefined,
   });
 
-  // prevent "Unexpected token <" errors
   const text = await res.text();
   try {
     return JSON.parse(text);
@@ -30,7 +29,10 @@ async function api(path, { method = "GET", body } = {}) {
 
 function money(n) {
   const x = Number(n || 0);
-  return x.toLocaleString("en-KE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  return x.toLocaleString("en-KE", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2,
+  });
 }
 
 function safe(n) {
@@ -39,7 +41,7 @@ function safe(n) {
 }
 
 function openPrintWindow(html) {
-  const w = window.open("", "_blank", "width=420,height=700");
+  const w = window.open("", "_blank", "width=420,height=760");
   if (!w) return alert("Popup blocked. Allow popups then try again.");
 
   w.document.open();
@@ -58,13 +60,12 @@ function openPrintWindow(html) {
           .right { text-align: right; }
           .center { text-align:center; }
           img { max-width: 150px; }
+          .logo { display:block; margin:0 auto 8px auto; max-height:70px; object-fit:contain; }
         </style>
       </head>
       <body>
         ${html}
-        <script>
-          window.onload = function() { window.print(); };
-        </script>
+        <script>window.onload = function() { window.print(); };</script>
       </body>
     </html>
   `);
@@ -94,9 +95,16 @@ export default function POS() {
   const [reprintNo, setReprintNo] = useState("");
   const [recentReceipts, setRecentReceipts] = useState([]);
 
-  // new customer modal
   const [showCustomerModal, setShowCustomerModal] = useState(false);
-  const [newCust, setNewCust] = useState({ name: "", phone: "", kra_pin: "" });
+  const [customerForm, setCustomerForm] = useState({
+    name: "",
+    phone: "",
+    email: "",
+    kra_pin: "",
+    account_balance: "",
+    credit_limit: "",
+    allow_credit: "0",
+  });
 
   useEffect(() => {
     loadAll();
@@ -116,6 +124,11 @@ export default function POS() {
     if (rRes.ok) setRecentReceipts(rRes.receipts || []);
   }
 
+  const selectedCustomer = useMemo(() => {
+    if (!customerId) return null;
+    return customers.find((c) => Number(c.id) === Number(customerId)) || null;
+  }, [customerId, customers]);
+
   const filtered = useMemo(() => {
     const s = q.trim().toLowerCase();
     if (!s) return products;
@@ -127,6 +140,43 @@ export default function POS() {
   function cartQty(pid) {
     const it = cart.find((x) => x.id === pid);
     return it ? it.qty : 0;
+  }
+
+  function lineTax(item) {
+    const subtotal = safe(item.qty) * safe(item.price);
+    const rate = safe(item.tax_rate);
+
+    if ((item.tax_type || "EXEMPT") === "EXEMPT" || rate <= 0) return 0;
+
+    if ((item.tax_type || "EXEMPT") === "INCLUSIVE") {
+      return subtotal - subtotal / (1 + rate / 100);
+    }
+
+    if ((item.tax_type || "EXEMPT") === "EXCLUSIVE") {
+      return subtotal * (rate / 100);
+    }
+
+    return 0;
+  }
+
+  function lineGross(item) {
+    const subtotal = safe(item.qty) * safe(item.price);
+    if ((item.tax_type || "EXEMPT") === "EXCLUSIVE") {
+      return subtotal + lineTax(item);
+    }
+    return subtotal;
+  }
+
+  function cartSubtotal() {
+    return cart.reduce((s, x) => s + safe(x.qty) * safe(x.price), 0);
+  }
+
+  function cartVat() {
+    return cart.reduce((s, x) => s + lineTax(x), 0);
+  }
+
+  function cartTotal() {
+    return cart.reduce((s, x) => s + lineGross(x), 0);
   }
 
   function addToCart(p) {
@@ -143,14 +193,14 @@ export default function POS() {
       setCart([
         ...cart,
         {
-  id: p.id,
-  name: p.name,
-  barcode: p.barcode || "",
-  price: safe(p.price),
-  qty: 1,
-  tax_type: p.tax_type || "EXEMPT",
-  tax_rate: safe(p.tax_rate),
-},
+          id: p.id,
+          name: p.name,
+          barcode: p.barcode || "",
+          price: safe(p.price),
+          qty: 1,
+          tax_type: p.tax_type || "EXEMPT",
+          tax_rate: safe(p.tax_rate),
+        },
       ]);
     }
   }
@@ -173,12 +223,9 @@ export default function POS() {
         alert("Insufficient stock");
         return prev;
       }
+
       return prev.map((x) => (x.id === pid ? { ...x, qty: nextQty } : x));
     });
-  }
-
-  function total() {
-    return cart.reduce((s, x) => s + x.qty * x.price, 0);
   }
 
   function scanEnter(e) {
@@ -193,57 +240,81 @@ export default function POS() {
   }
 
   async function completeSale() {
-    const t = Number(total().toFixed(2));
+    const subtotal = Number(cartSubtotal().toFixed(2));
+    const vat = Number(cartVat().toFixed(2));
+    const total = Number(cartTotal().toFixed(2));
+
     if (cart.length === 0) return alert("Cart is empty");
 
-    const paid = safe(amountPaid);
-    if (paid < t) return alert("Money less than total");
+    if ((paymentMode === "Account" || paymentMode === "Credit") && !customerId) {
+      return alert("Please choose a customer for Account or Credit sale");
+    }
 
-    if (paymentMode !== "Cash" && paymentRef.trim().length < 2) {
-      return alert("Reference code required for " + paymentMode);
+    let paid = safe(amountPaid);
+    let payloadRef = paymentRef.trim();
+
+    if (paymentMode === "Cash") {
+      if (paid < total) return alert("Money less than total");
+    }
+
+    if (["Mpesa", "Bank", "Cheque"].includes(paymentMode)) {
+      if (payloadRef.length < 2) return alert("Reference code required for " + paymentMode);
+      paid = total;
+    }
+
+    if (paymentMode === "Account") {
+      paid = total;
+      payloadRef = "ACCOUNT";
+    }
+
+    if (paymentMode === "Credit") {
+      paid = 0;
+      payloadRef = "CREDIT";
     }
 
     const payload = {
       items: cart.map((x) => ({ product_id: x.id, qty: x.qty, price: x.price })),
       customer_id: customerId ? Number(customerId) : null,
       payment_mode: paymentMode,
-      payment_ref: paymentMode === "Cash" ? "" : paymentRef.trim(),
+      payment_ref: paymentMode === "Cash" ? "" : payloadRef,
       amount_paid: paid,
     };
 
     const res = await api("/pos/complete-sale", { method: "POST", body: payload });
     if (!res.ok) return alert(res.message);
 
-    const change = Number((paid - t).toFixed(2));
+    const change = paymentMode === "Cash" ? Number((paid - total).toFixed(2)) : 0;
     const receiptNo = res.result.receipt_no;
 
-    // get buyer pin from customer list (if selected)
-    const buyer = customerId ? customers.find((c) => Number(c.id) === Number(customerId)) : null;
+    const buyer = selectedCustomer;
 
     const r = {
       receipt_no: receiptNo,
       created_at: new Date().toLocaleString(),
       payment_mode: paymentMode,
-      payment_ref: paymentMode === "Cash" ? "" : paymentRef.trim(),
+      payment_ref: paymentMode === "Cash" ? "" : payloadRef,
       amount_paid: paid,
-      total: t,
+      subtotal,
+      vat,
+      total,
       change_given: change,
       seller_pin: company?.kra_pin || "",
       buyer_pin: buyer?.kra_pin || "",
       items: cart.map((x) => ({
-  name: x.name,
-  barcode: x.barcode,
-  qty: x.qty,
-  price: x.price,
-  tax_type: x.tax_type || "EXEMPT",
-  tax_rate: safe(x.tax_rate),
-  subtotal: Number((x.qty * x.price).toFixed(2)),
-})),
+        name: x.name,
+        barcode: x.barcode,
+        qty: x.qty,
+        price: x.price,
+        tax_type: x.tax_type || "EXEMPT",
+        tax_rate: safe(x.tax_rate),
+        tax_amount: Number(lineTax(x).toFixed(2)),
+        subtotal: Number((safe(x.qty) * safe(x.price)).toFixed(2)),
+        gross_total: Number(lineGross(x).toFixed(2)),
+      })),
     };
 
     setReceipt(r);
 
-    // generate QR for tracking (public endpoint)
     const qrUrl = `${API_BASE}/public/receipt/${encodeURIComponent(receiptNo)}`;
     try {
       const dataUrl = await QRCode.toDataURL(qrUrl, { margin: 1, width: 180 });
@@ -252,7 +323,6 @@ export default function POS() {
       setReceiptQr("");
     }
 
-    // reset
     setCart([]);
     setAmountPaid("");
     setPaymentRef("");
@@ -265,7 +335,6 @@ export default function POS() {
     const res = await api(`/pos/receipt/${encodeURIComponent(no)}`);
     if (!res.ok) return alert(res.message);
 
-    // also generate QR again
     const qrUrl = `${API_BASE}/public/receipt/${encodeURIComponent(res.sale.receipt_no)}`;
     try {
       const dataUrl = await QRCode.toDataURL(qrUrl, { margin: 1, width: 180 });
@@ -274,33 +343,71 @@ export default function POS() {
       setReceiptQr("");
     }
 
+    const items = (res.items || []).map((i) => {
+      const item = {
+        name: i.name,
+        barcode: i.barcode,
+        qty: safe(i.qty),
+        price: safe(i.price),
+        subtotal: safe(i.subtotal),
+        tax_type: i.tax_type || "EXEMPT",
+        tax_rate: safe(i.tax_rate),
+      };
+      return {
+        ...item,
+        tax_amount: Number(lineTax(item).toFixed(2)),
+        gross_total: Number(lineGross(item).toFixed(2)),
+      };
+    });
+
+    const subtotal = items.reduce((s, i) => s + safe(i.subtotal), 0);
+    const vat = items.reduce((s, i) => s + safe(i.tax_amount), 0);
+    const total = items.reduce((s, i) => s + safe(i.gross_total), 0);
+
     setReceipt({
       receipt_no: res.sale.receipt_no,
       created_at: res.sale.created_at,
       payment_mode: res.sale.payment_mode,
       payment_ref: res.sale.payment_ref,
-      total: res.sale.total,
+      subtotal,
+      vat,
+      total,
       amount_paid: res.sale.amount_paid,
       change_given: res.sale.change_given,
       seller_pin: res.company?.kra_pin || company?.kra_pin || "",
       buyer_pin: res.sale?.customer_kra_pin || "",
-      items: (res.items || []).map((i) => ({
-        name: i.name,
-        barcode: i.barcode,
-        qty: i.qty,
-        price: i.price,
-        subtotal: i.subtotal,
-      })),
+      items,
     });
   }
 
   async function createCustomer() {
-    if (!newCust.name.trim()) return alert("Customer name required");
-    const res = await api("/customers", { method: "POST", body: newCust });
+    if (!customerForm.name.trim()) return alert("Customer name required");
+
+    const res = await api("/customers", {
+      method: "POST",
+      body: {
+        name: customerForm.name,
+        phone: customerForm.phone,
+        email: customerForm.email,
+        kra_pin: customerForm.kra_pin,
+        account_balance: Number(customerForm.account_balance || 0),
+        credit_limit: Number(customerForm.credit_limit || 0),
+        allow_credit: Number(customerForm.allow_credit || 0),
+      },
+    });
+
     if (!res.ok) return alert(res.message);
 
     setShowCustomerModal(false);
-    setNewCust({ name: "", phone: "", kra_pin: "" });
+    setCustomerForm({
+      name: "",
+      phone: "",
+      email: "",
+      kra_pin: "",
+      account_balance: "",
+      credit_limit: "",
+      allow_credit: "0",
+    });
 
     await loadAll();
     alert("Customer created ✅");
@@ -310,10 +417,12 @@ export default function POS() {
     const shop = company?.name || "BROESTA";
     const sellerPin = r.seller_pin || company?.kra_pin || "";
     const buyerPin = r.buyer_pin || "";
-
     const phone = company?.phone ? `Tel: ${company.phone}` : "";
     const loc = company?.location ? company.location : "";
     const footer = company?.receipt_footer || "Thank you for shopping with us!";
+    const logo = company?.logo_url
+      ? `<div class="center"><img class="logo" src="${company.logo_url}" alt="logo" /></div>`
+      : "";
 
     const itemsRows = (r.items || [])
       .map(
@@ -322,9 +431,10 @@ export default function POS() {
           <td>
             <b>${i.name}</b><br/>
             <span class="muted">${i.barcode || ""}</span><br/>
-            <span class="muted">${i.qty} x ${Number(i.price).toFixed(2)}</span>
+            <span class="muted">${i.qty} x ${Number(i.price).toFixed(2)}</span><br/>
+            <span class="muted">Tax: ${i.tax_type || "EXEMPT"}${Number(i.tax_rate || 0) > 0 ? " " + i.tax_rate + "%" : ""}</span>
           </td>
-          <td class="right"><b>${Number(i.subtotal).toFixed(2)}</b></td>
+          <td class="right"><b>${Number(i.gross_total ?? i.subtotal).toFixed(2)}</b></td>
         </tr>
       `
       )
@@ -336,11 +446,12 @@ export default function POS() {
 
     return `
       <div class="r">
-        <h3>${shop}</h3>
-        ${sellerPin ? `<div class="muted">SELLER PIN: ${sellerPin}</div>` : ""}
-        ${buyerPin ? `<div class="muted">BUYER PIN: ${buyerPin}</div>` : ""}
-        <div class="muted">${phone}</div>
-        <div class="muted">${loc}</div>
+        ${logo}
+        <h3 class="center">${shop}</h3>
+        ${sellerPin ? `<div class="muted center">SELLER PIN: ${sellerPin}</div>` : ""}
+        ${buyerPin ? `<div class="muted center">BUYER PIN: ${buyerPin}</div>` : ""}
+        <div class="muted center">${phone}</div>
+        <div class="muted center">${loc}</div>
 
         <div class="line"></div>
 
@@ -353,6 +464,8 @@ export default function POS() {
         <div class="line"></div>
 
         <table>
+          <tr><td>Subtotal</td><td class="right">${Number(r.subtotal || 0).toFixed(2)}</td></tr>
+          <tr><td>VAT</td><td class="right">${Number(r.vat || 0).toFixed(2)}</td></tr>
           <tr><td><b>TOTAL</b></td><td class="right"><b>${Number(r.total).toFixed(2)}</b></td></tr>
           <tr><td>PAID</td><td class="right">${Number(r.amount_paid).toFixed(2)}</td></tr>
           <tr><td>CHANGE</td><td class="right">${Number(r.change_given ?? 0).toFixed(2)}</td></tr>
@@ -369,7 +482,6 @@ export default function POS() {
 
   return (
     <div style={{ minHeight: "100vh", background: "#f4f6f9" }}>
-      {/* TOP BAR */}
       <div
         style={{
           height: 64,
@@ -389,7 +501,6 @@ export default function POS() {
         </div>
       </div>
 
-      {/* MAIN */}
       <div
         style={{
           padding: 16,
@@ -399,7 +510,6 @@ export default function POS() {
           alignItems: "start",
         }}
       >
-        {/* LEFT: PRODUCTS */}
         <div
           style={{
             background: "#fff",
@@ -456,6 +566,9 @@ export default function POS() {
                 <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
                   Ref: {p.reference || "-"} • Barcode: {p.barcode || "-"}
                 </div>
+                <div style={{ marginTop: 4, fontSize: 12, opacity: 0.75 }}>
+                  Tax: {p.tax_type || "EXEMPT"} {Number(p.tax_rate || 0) > 0 ? `(${p.tax_rate}%)` : ""}
+                </div>
               </div>
             ))}
           </div>
@@ -467,9 +580,7 @@ export default function POS() {
           )}
         </div>
 
-        {/* RIGHT: CART + PAYMENT */}
         <div style={{ display: "grid", gap: 14 }}>
-          {/* CART */}
           <div
             style={{
               background: "#fff",
@@ -509,7 +620,13 @@ export default function POS() {
                   <div style={{ flex: 1 }}>
                     <div style={{ fontWeight: 800 }}>{it.name}</div>
                     <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      KSh {money(it.price)} × {it.qty} = <b>KSh {money(it.price * it.qty)}</b>
+                      KSh {money(it.price)} × {it.qty}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.7 }}>
+                      Tax: {it.tax_type || "EXEMPT"} {Number(it.tax_rate || 0) > 0 ? `(${it.tax_rate}%)` : ""}
+                    </div>
+                    <div style={{ fontSize: 12, opacity: 0.85 }}>
+                      Line Total: <b>KSh {money(lineGross(it))}</b>
                     </div>
                   </div>
                   <div style={{ display: "flex", gap: 6 }}>
@@ -521,12 +638,17 @@ export default function POS() {
               ))}
             </div>
 
-            <div style={{ marginTop: 10, fontWeight: 950, fontSize: 18 }}>
-              Total: KSh {money(total())}
+            <div style={{ marginTop: 10, fontSize: 13, opacity: 0.85 }}>
+              Subtotal: KSh {money(cartSubtotal())}
+            </div>
+            <div style={{ marginTop: 4, fontSize: 13, opacity: 0.85 }}>
+              VAT: KSh {money(cartVat())}
+            </div>
+            <div style={{ marginTop: 8, fontWeight: 950, fontSize: 18 }}>
+              Total: KSh {money(cartTotal())}
             </div>
           </div>
 
-          {/* PAYMENT */}
           <div
             style={{
               background: "#fff",
@@ -543,22 +665,42 @@ export default function POS() {
                 <option value="">Walk-in Customer</option>
                 {customers.map((c) => (
                   <option key={c.id} value={c.id}>
-                    {c.name} • {c.loyalty_points} pts
+                    {c.name} • {c.loyalty_points || 0} pts
                   </option>
                 ))}
               </select>
               <button className="btn" onClick={() => setShowCustomerModal(true)}>+ New</button>
             </div>
 
+            {selectedCustomer && (
+              <div
+                style={{
+                  marginTop: 10,
+                  padding: 10,
+                  border: "1px solid #eee",
+                  borderRadius: 12,
+                  background: "#fafafa",
+                  fontSize: 12,
+                }}
+              >
+                <div><b>Account Balance:</b> KSh {money(selectedCustomer.account_balance)}</div>
+                <div><b>Credit Limit:</b> KSh {money(selectedCustomer.credit_limit)}</div>
+                <div><b>Credit Used:</b> KSh {money(selectedCustomer.credit_used)}</div>
+                <div><b>Credit Allowed:</b> {Number(selectedCustomer.allow_credit || 0) ? "Yes" : "No"}</div>
+              </div>
+            )}
+
             <label className="lbl">Payment Mode</label>
             <select className="inp" value={paymentMode} onChange={(e) => setPaymentMode(e.target.value)}>
-              <option>Cash</option>
-              <option>Mpesa</option>
-              <option>Bank</option>
-              <option>Cheque</option>
+              <option value="Cash">Cash</option>
+              <option value="Mpesa">Mpesa</option>
+              <option value="Bank">Bank</option>
+              <option value="Cheque">Cheque</option>
+              <option value="Account">Account</option>
+              <option value="Credit">Credit</option>
             </select>
 
-            {paymentMode !== "Cash" && (
+            {["Mpesa", "Bank", "Cheque"].includes(paymentMode) && (
               <>
                 <label className="lbl">Reference Code</label>
                 <input
@@ -570,21 +712,36 @@ export default function POS() {
               </>
             )}
 
-            <label className="lbl">Amount Paid</label>
-            <input
-              className="inp"
-              type="number"
-              inputMode="numeric"
-              placeholder="e.g. 1000"
-              value={amountPaid}
-              onChange={(e) => setAmountPaid(e.target.value)}
-            />
+            {paymentMode === "Cash" && (
+              <>
+                <label className="lbl">Amount Paid</label>
+                <input
+                  className="inp"
+                  type="number"
+                  inputMode="numeric"
+                  placeholder="e.g. 1000"
+                  value={amountPaid}
+                  onChange={(e) => setAmountPaid(e.target.value)}
+                />
+              </>
+            )}
+
+            {paymentMode === "Account" && (
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
+                Sale will deduct from selected customer's account balance.
+              </div>
+            )}
+
+            {paymentMode === "Credit" && (
+              <div style={{ marginTop: 10, fontSize: 12, opacity: 0.8 }}>
+                Sale will be posted to selected customer's credit balance.
+              </div>
+            )}
 
             <button className="btn primary" style={{ width: "100%", marginTop: 12 }} onClick={completeSale}>
               Complete Sale
             </button>
 
-            {/* REPRINT */}
             <div style={{ marginTop: 16 }}>
               <div style={{ fontWeight: 900, marginBottom: 6 }}>Reprint Receipt</div>
               <div style={{ display: "flex", gap: 8 }}>
@@ -625,7 +782,6 @@ export default function POS() {
         </div>
       </div>
 
-      {/* NEW CUSTOMER MODAL */}
       {showCustomerModal && (
         <div
           style={{
@@ -657,26 +813,70 @@ export default function POS() {
             </div>
 
             <label className="lbl">Name</label>
-            <input className="inp" value={newCust.name} onChange={(e) => setNewCust({ ...newCust, name: e.target.value })} />
+            <input
+              className="inp"
+              value={customerForm.name}
+              onChange={(e) => setCustomerForm({ ...customerForm, name: e.target.value })}
+            />
 
             <label className="lbl">Phone (optional)</label>
-            <input className="inp" value={newCust.phone} onChange={(e) => setNewCust({ ...newCust, phone: e.target.value })} />
+            <input
+              className="inp"
+              value={customerForm.phone}
+              onChange={(e) => setCustomerForm({ ...customerForm, phone: e.target.value })}
+            />
+
+            <label className="lbl">Email (optional)</label>
+            <input
+              className="inp"
+              value={customerForm.email}
+              onChange={(e) => setCustomerForm({ ...customerForm, email: e.target.value })}
+            />
 
             <label className="lbl">Buyer KRA PIN (optional)</label>
-            <input className="inp" value={newCust.kra_pin} onChange={(e) => setNewCust({ ...newCust, kra_pin: e.target.value })} />
+            <input
+              className="inp"
+              value={customerForm.kra_pin}
+              onChange={(e) => setCustomerForm({ ...customerForm, kra_pin: e.target.value })}
+            />
+
+            <label className="lbl">Opening Account Balance</label>
+            <input
+              className="inp"
+              type="number"
+              value={customerForm.account_balance}
+              onChange={(e) => setCustomerForm({ ...customerForm, account_balance: e.target.value })}
+            />
+
+            <label className="lbl">Credit Limit</label>
+            <input
+              className="inp"
+              type="number"
+              value={customerForm.credit_limit}
+              onChange={(e) => setCustomerForm({ ...customerForm, credit_limit: e.target.value })}
+            />
+
+            <label className="lbl">Allow Credit</label>
+            <select
+              className="inp"
+              value={customerForm.allow_credit}
+              onChange={(e) => setCustomerForm({ ...customerForm, allow_credit: e.target.value })}
+            >
+              <option value="0">Credit Not Allowed</option>
+              <option value="1">Allow Credit</option>
+            </select>
 
             <button className="btn primary" style={{ width: "100%", marginTop: 12 }} onClick={createCustomer}>
               Save Customer
             </button>
 
             <div style={{ marginTop: 8, fontSize: 12, opacity: 0.75 }}>
-              Buyer PIN will appear on receipt if customer is selected.
+              Buyer PIN appears on receipt if customer is selected.
             </div>
           </div>
         </div>
       )}
 
-      {/* RECEIPT MODAL */}
       {receipt && (
         <div
           style={{
@@ -742,12 +942,14 @@ Payment: ${receipt.payment_mode}${receipt.payment_ref ? " (" + receipt.payment_r
 
 Items:
 ${(receipt.items || [])
-  .map((i) => `- ${i.name}  ${i.qty} x ${Number(i.price).toFixed(2)} = ${Number(i.subtotal).toFixed(2)} [${i.tax_type || "EXEMPT"}${Number(i.tax_rate || 0) > 0 ? " " + i.tax_rate + "%" : ""}]`)
+  .map((i) => `- ${i.name}  ${i.qty} x ${Number(i.price).toFixed(2)} = ${Number(i.gross_total ?? i.subtotal).toFixed(2)} [${i.tax_type || "EXEMPT"}${Number(i.tax_rate || 0) > 0 ? " " + i.tax_rate + "%" : ""}]`)
   .join("\n")}
 
-TOTAL:  KSh ${Number(receipt.total).toFixed(2)}
-PAID:   KSh ${Number(receipt.amount_paid).toFixed(2)}
-CHANGE: KSh ${Number(receipt.change_given ?? 0).toFixed(2)}
+SUBTOTAL: KSh ${Number(receipt.subtotal || 0).toFixed(2)}
+VAT:      KSh ${Number(receipt.vat || 0).toFixed(2)}
+TOTAL:    KSh ${Number(receipt.total).toFixed(2)}
+PAID:     KSh ${Number(receipt.amount_paid).toFixed(2)}
+CHANGE:   KSh ${Number(receipt.change_given ?? 0).toFixed(2)}
 
 QR: ${API_BASE}/public/receipt/${receipt.receipt_no}
 `}

@@ -9,6 +9,7 @@ import Barcode from "./pages/barcode.jsx";
 import Website from "./pages/website.jsx";
 import Company from "./pages/company.jsx";
 import PublicShop from "./pages/publicshop.jsx";
+import Security from "./pages/security.jsx";
 
 const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8080";
 
@@ -77,7 +78,8 @@ function AppsDashboard() {
     { id: "sales", name: "Sales", icon: "💰", color: "#FFE1F0" },
     { id: "inventory", name: "Inventory", icon: "📊", color: "#E8F8FF" },
     { id: "accounting", name: "Accounting", icon: "📒", color: "#FFF3CD" },
-    { id: "website", name: "Website", icon: "🌐", color: "#F1F1F1" }
+    { id: "website", name: "Website", icon: "🌐", color: "#F1F1F1" },
+    { id: "security", name: "Security", icon: "🔐", color: "#FDE2E2" },
   ]), []);
 
   return (
@@ -115,6 +117,7 @@ export default function App() {
     <Route path="/website" element={<RequireAuth><Website /></RequireAuth>} />
     <Route path="/company" element={<RequireAuth><Company /></RequireAuth>} />
     <Route path="/shop" element={<PublicShop />} />
+    <Route path="/security" element={<RequireAuth><Security /></RequireAuth>} />
   </Routes>
 );
 }
