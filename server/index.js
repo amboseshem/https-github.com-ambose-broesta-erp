@@ -1,4 +1,3 @@
-const { pool } = require("./db");
 const express = require("express");
 const cors = require("cors");
 const path = require("path");
@@ -15,13 +14,15 @@ const app = express();
 app.use(cors({
   origin: true,
   credentials: true,
-  methods: ["GET","POST","PUT","PATCH","DELETE","OPTIONS"],
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
   allowedHeaders: ["Content-Type", "Authorization"],
 }));
+
 app.use((req, res, next) => {
   if (req.method === "OPTIONS") return res.sendStatus(204);
   next();
 });
+
 app.use(express.json());
 
 // ==============================
@@ -30,11 +31,10 @@ app.use(express.json());
 const DB_PATH = path.join(__dirname, "data.db");
 const db = new Database(DB_PATH);
 
-// CHANGE later when hosting:
-const JWT_SECRET = "BROESTA_CHANGE_THIS_SECRET_LATER";
+const JWT_SECRET = process.env.JWT_SECRET || "BROESTA_CHANGE_THIS_SECRET_LATER";
 
 // ==============================
-// DB INIT (STABLE BASE)
+// DB INIT
 // ==============================
 db.exec(`
 PRAGMA journal_mode = WAL;
@@ -72,6 +72,10 @@ CREATE TABLE IF NOT EXISTS customers (
   email TEXT NOT NULL DEFAULT '',
   kra_pin TEXT NOT NULL DEFAULT '',
   loyalty_points REAL NOT NULL DEFAULT 0 CHECK(loyalty_points >= 0),
+  account_balance REAL NOT NULL DEFAULT 0 CHECK(account_balance >= 0),
+  credit_limit REAL NOT NULL DEFAULT 0 CHECK(credit_limit >= 0),
+  credit_used REAL NOT NULL DEFAULT 0 CHECK(credit_used >= 0),
+  allow_credit INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
 
@@ -94,6 +98,8 @@ CREATE TABLE IF NOT EXISTS products (
   stock REAL NOT NULL DEFAULT 0 CHECK(stock >= 0),
   tax_type TEXT NOT NULL DEFAULT 'EXEMPT' CHECK(tax_type IN ('INCLUSIVE','EXEMPT','EXCLUSIVE')),
   tax_rate REAL NOT NULL DEFAULT 0 CHECK(tax_rate >= 0),
+  category_id INTEGER,
+  image_url TEXT NOT NULL DEFAULT '',
   active INTEGER NOT NULL DEFAULT 1,
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
@@ -116,7 +122,7 @@ CREATE TABLE IF NOT EXISTS pos_sales (
   receipt_no TEXT UNIQUE NOT NULL,
   customer_id INTEGER,
   total REAL NOT NULL DEFAULT 0 CHECK(total >= 0),
-  payment_mode TEXT NOT NULL CHECK(payment_mode IN ('Cash','Mpesa','Bank','Cheque')),
+  payment_mode TEXT NOT NULL CHECK(payment_mode IN ('Cash','Mpesa','Bank','Cheque','Account','Credit')),
   payment_ref TEXT NOT NULL DEFAULT '',
   amount_paid REAL NOT NULL DEFAULT 0 CHECK(amount_paid >= 0),
   change_given REAL NOT NULL DEFAULT 0 CHECK(change_given >= 0),
@@ -137,7 +143,6 @@ CREATE TABLE IF NOT EXISTS pos_sale_items (
   FOREIGN KEY (product_id) REFERENCES products(id)
 );
 
--- PURCHASE
 CREATE TABLE IF NOT EXISTS purchase_orders (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   po_no TEXT UNIQUE NOT NULL,
@@ -159,7 +164,6 @@ CREATE TABLE IF NOT EXISTS purchase_order_items (
   FOREIGN KEY (product_id) REFERENCES products(id)
 );
 
--- SALES
 CREATE TABLE IF NOT EXISTS sales_quotes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   quote_no TEXT UNIQUE NOT NULL,
@@ -243,10 +247,9 @@ CREATE TABLE IF NOT EXISTS invoice_items (
   FOREIGN KEY (product_id) REFERENCES products(id)
 );
 
--- ACCOUNTING (READY FOR NEXT STEP)
 CREATE TABLE IF NOT EXISTS journals (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
-  code TEXT UNIQUE NOT NULL,     -- CASH, MPESA, BANK, SALES, PURCHASE
+  code TEXT UNIQUE NOT NULL,
   name TEXT NOT NULL
 );
 
@@ -264,29 +267,98 @@ CREATE TABLE IF NOT EXISTS payments (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
   source TEXT NOT NULL CHECK(source IN ('POS','INVOICE','PURCHASE')),
   ref TEXT NOT NULL,
-  mode TEXT NOT NULL CHECK(mode IN ('Cash','Mpesa','Bank','Cheque')),
+  mode TEXT NOT NULL CHECK(mode IN ('Cash','Mpesa','Bank','Cheque','Account','Credit')),
   pay_ref TEXT NOT NULL DEFAULT '',
   amount REAL NOT NULL CHECK(amount >= 0),
   created_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS website_settings (
+  id INTEGER PRIMARY KEY CHECK (id = 1),
+  store_name TEXT NOT NULL DEFAULT 'Broesta Shop',
+  hero_title TEXT NOT NULL DEFAULT 'Welcome to Broesta Shop',
+  hero_subtitle TEXT NOT NULL DEFAULT 'Quality products at the best prices',
+  about_text TEXT NOT NULL DEFAULT 'We serve our customers with excellence.',
+  whatsapp TEXT NOT NULL DEFAULT '',
+  facebook TEXT NOT NULL DEFAULT '',
+  instagram TEXT NOT NULL DEFAULT '',
+  tiktok TEXT NOT NULL DEFAULT '',
+  logo_url TEXT NOT NULL DEFAULT '',
+  banner_url TEXT NOT NULL DEFAULT '',
+  theme_color TEXT NOT NULL DEFAULT '#0b5bd3',
+  contact_phone TEXT NOT NULL DEFAULT '',
+  contact_email TEXT NOT NULL DEFAULT '',
+  contact_location TEXT NOT NULL DEFAULT ''
+);
+
+CREATE TABLE IF NOT EXISTS categories (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  name TEXT UNIQUE NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS product_images (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  product_id INTEGER NOT NULL,
+  image_url TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS website_orders (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_no TEXT UNIQUE NOT NULL,
+  customer_name TEXT NOT NULL,
+  customer_phone TEXT NOT NULL,
+  customer_email TEXT NOT NULL DEFAULT '',
+  delivery_location TEXT NOT NULL DEFAULT '',
+  note TEXT NOT NULL DEFAULT '',
+  total REAL NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'NEW' CHECK(status IN ('NEW','CONFIRMED','PROCESSING','COMPLETED','CANCELLED')),
+  created_at TEXT NOT NULL DEFAULT (datetime('now'))
+);
+
+CREATE TABLE IF NOT EXISTS website_order_items (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  order_id INTEGER NOT NULL,
+  product_id INTEGER NOT NULL,
+  product_name TEXT NOT NULL,
+  qty REAL NOT NULL CHECK(qty > 0),
+  price REAL NOT NULL CHECK(price >= 0),
+  subtotal REAL NOT NULL CHECK(subtotal >= 0),
+  FOREIGN KEY (order_id) REFERENCES website_orders(id) ON DELETE CASCADE,
+  FOREIGN KEY (product_id) REFERENCES products(id)
+);
 `);
 
-// Safe product schema upgrades (for existing databases)
+// ==============================
+// SAFE SCHEMA UPGRADES
+// ==============================
 try { db.prepare("ALTER TABLE products ADD COLUMN tax_type TEXT NOT NULL DEFAULT 'EXEMPT'").run(); } catch {}
 try { db.prepare("ALTER TABLE products ADD COLUMN tax_rate REAL NOT NULL DEFAULT 0").run(); } catch {}
+try { db.prepare("ALTER TABLE products ADD COLUMN category_id INTEGER").run(); } catch {}
+try { db.prepare("ALTER TABLE products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''").run(); } catch {}
 
-// ensure company row
+try { db.prepare("ALTER TABLE customers ADD COLUMN account_balance REAL NOT NULL DEFAULT 0").run(); } catch {}
+try { db.prepare("ALTER TABLE customers ADD COLUMN credit_limit REAL NOT NULL DEFAULT 0").run(); } catch {}
+try { db.prepare("ALTER TABLE customers ADD COLUMN credit_used REAL NOT NULL DEFAULT 0").run(); } catch {}
+try { db.prepare("ALTER TABLE customers ADD COLUMN allow_credit INTEGER NOT NULL DEFAULT 0").run(); } catch {}
+
+// ==============================
+// SEED / ENSURE
+// ==============================
 const companyRow = db.prepare("SELECT id FROM company WHERE id=1").get();
 if (!companyRow) db.prepare("INSERT INTO company (id) VALUES (1)").run();
 
-// ensure counters
+const wsRow = db.prepare("SELECT id FROM website_settings WHERE id=1").get();
+if (!wsRow) db.prepare("INSERT INTO website_settings (id) VALUES (1)").run();
+
 function ensureCounter(key) {
   const row = db.prepare("SELECT key FROM counters WHERE key=?").get(key);
   if (!row) db.prepare("INSERT INTO counters (key,last_number) VALUES (?,0)").run(key);
 }
-["receipt","po","quote","so","dn","inv"].forEach(ensureCounter);
+["receipt", "po", "quote", "so", "dn", "inv", "weborder"].forEach(ensureCounter);
 
-// seed admin
 const adminRow = db.prepare("SELECT id FROM users WHERE username='admin'").get();
 if (!adminRow) {
   const hash = bcrypt.hashSync("1234", 10);
@@ -294,16 +366,15 @@ if (!adminRow) {
     .run("admin", hash, "admin");
 }
 
-// seed journals (safe)
-function ensureJournal(code, name){
+function ensureJournal(code, name) {
   const j = db.prepare("SELECT id FROM journals WHERE code=?").get(code);
   if (!j) db.prepare("INSERT INTO journals (code,name) VALUES (?,?)").run(code, name);
 }
-ensureJournal("CASH","Cash");
-ensureJournal("MPESA","Mpesa");
-ensureJournal("BANK","Bank");
-ensureJournal("SALES","Sales");
-ensureJournal("PURCHASE","Purchases");
+ensureJournal("CASH", "Cash");
+ensureJournal("MPESA", "Mpesa");
+ensureJournal("BANK", "Bank");
+ensureJournal("SALES", "Sales");
+ensureJournal("PURCHASE", "Purchases");
 
 // ==============================
 // HELPERS
@@ -318,7 +389,9 @@ function nextNo(key, prefix, digits = 6) {
   return tx();
 }
 
-function sum2(n) { return Number((Number(n || 0)).toFixed(2)); }
+function sum2(n) {
+  return Number((Number(n || 0)).toFixed(2));
+}
 
 function auth(req, res, next) {
   const header = req.headers.authorization || "";
@@ -334,12 +407,15 @@ function auth(req, res, next) {
 }
 
 // ==============================
-// HEALTH + ROOT
+// ROOT + HEALTH
 // ==============================
 app.get("/", (req, res) => {
   res.json({ ok: true, name: "broesta-erp-server", time: new Date().toISOString() });
 });
-app.get("/health", (req, res) => res.json({ ok: true, name: "broesta-erp-server" }));
+
+app.get("/health", (req, res) => {
+  res.json({ ok: true, name: "broesta-erp-server" });
+});
 
 // ==============================
 // AUTH
@@ -347,13 +423,53 @@ app.get("/health", (req, res) => res.json({ ok: true, name: "broesta-erp-server"
 app.post("/auth/login", (req, res) => {
   try {
     const { username, password } = req.body || {};
-    if (String(username || "").trim() !== "admin") return res.json({ ok: false, message: "Wrong username" });
-    if (String(password || "").trim() !== "1234") return res.json({ ok: false, message: "Wrong password" });
 
-    const token = jwt.sign({ username: "admin", role: "admin" }, JWT_SECRET, { expiresIn: "30d" });
+    const user = db.prepare("SELECT * FROM users WHERE username=?").get(String(username || "").trim());
+    if (!user) return res.json({ ok: false, message: "Wrong username" });
+
+    const ok = bcrypt.compareSync(String(password || ""), user.password_hash);
+    if (!ok) return res.json({ ok: false, message: "Wrong password" });
+
+    const token = jwt.sign(
+      { username: user.username, role: user.role },
+      JWT_SECRET,
+      { expiresIn: "30d" }
+    );
+
     return res.json({ ok: true, token });
   } catch {
     return res.json({ ok: false, message: "Login failed" });
+  }
+});
+
+app.post("/auth/change-password", auth, (req, res) => {
+  try {
+    const schema = z.object({
+      current_password: z.string().min(1),
+      new_password: z.string().min(4),
+      confirm_password: z.string().min(4),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
+
+    const { current_password, new_password, confirm_password } = parsed.data;
+    if (new_password !== confirm_password) {
+      return res.json({ ok: false, message: "New passwords do not match" });
+    }
+
+    const user = db.prepare("SELECT * FROM users WHERE username=?").get(req.user.username);
+    if (!user) return res.json({ ok: false, message: "User not found" });
+
+    const ok = bcrypt.compareSync(current_password, user.password_hash);
+    if (!ok) return res.json({ ok: false, message: "Current password is wrong" });
+
+    const newHash = bcrypt.hashSync(new_password, 10);
+    db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(newHash, user.id);
+
+    return res.json({ ok: true, message: "Password changed successfully" });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
   }
 });
 
@@ -376,6 +492,7 @@ app.put("/company", auth, (req, res) => {
     receipt_footer: z.string().optional().default(""),
     logo_url: z.string().optional().default("")
   });
+
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.status(400).json({ ok: false, message: "Invalid input" });
 
@@ -390,7 +507,7 @@ app.put("/company", auth, (req, res) => {
 });
 
 // ==============================
-// PRODUCTS (single clean route)
+// PRODUCTS
 // ==============================
 app.get("/products", auth, (req, res) => {
   const rows = db.prepare("SELECT * FROM products WHERE active=1 ORDER BY id DESC").all();
@@ -399,18 +516,18 @@ app.get("/products", auth, (req, res) => {
 
 app.post("/products", auth, (req, res) => {
   const schema = z.object({
-  name: z.string().min(1),
-  reference: z.string().optional().default(""),
-  barcode: z.string().optional().default(""),
-  price: z.coerce.number().finite().min(0).optional().default(0),
-  cost: z.coerce.number().finite().min(0).optional().default(0),
-  stock: z.coerce.number().finite().min(0).optional().default(0),
-  tax_type: z.enum(["INCLUSIVE", "EXEMPT", "EXCLUSIVE"]).optional().default("EXEMPT"),
-  tax_rate: z.coerce.number().finite().min(0).optional().default(0),
-});
+    name: z.string().min(1),
+    reference: z.string().optional().default(""),
+    barcode: z.string().optional().default(""),
+    price: z.coerce.number().finite().min(0).optional().default(0),
+    cost: z.coerce.number().finite().min(0).optional().default(0),
+    stock: z.coerce.number().finite().min(0).optional().default(0),
+    tax_type: z.enum(["INCLUSIVE", "EXEMPT", "EXCLUSIVE"]).optional().default("EXEMPT"),
+    tax_rate: z.coerce.number().finite().min(0).optional().default(0),
+  });
 
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid input" });
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
 
   const p = parsed.data;
   const barcode = (p.barcode || "").trim();
@@ -418,34 +535,33 @@ app.post("/products", auth, (req, res) => {
 
   try {
     const info = db.prepare(`
-  INSERT INTO products (name, reference, barcode, price, cost, stock, tax_type, tax_rate)
-  VALUES (?,?,?,?,?,?,?,?)
-`).run(
-  p.name.trim(),
-  (p.reference || "").trim(),
-  safeBarcode,
-  p.price,
-  p.cost,
-  p.stock,
-  p.tax_type,
-  p.tax_rate
-);
+      INSERT INTO products (name, reference, barcode, price, cost, stock, tax_type, tax_rate)
+      VALUES (?,?,?,?,?,?,?,?)
+    `).run(
+      p.name.trim(),
+      (p.reference || "").trim(),
+      safeBarcode,
+      p.price,
+      p.cost,
+      p.stock,
+      p.tax_type,
+      p.tax_rate
+    );
 
     const newId = Number(info.lastInsertRowid);
 
-    // Auto barcode if empty
     if (!safeBarcode) {
       const gen = String(200000000000 + newId);
       db.prepare("UPDATE products SET barcode=? WHERE id=?").run(gen, newId);
     }
 
-    return res.json({ ok:true });
+    return res.json({ ok: true });
   } catch (e) {
     if (safeBarcode) {
       const ex = db.prepare("SELECT name,barcode FROM products WHERE barcode=?").get(safeBarcode);
-      if (ex) return res.json({ ok:false, message:`Barcode already used by: ${ex.name} (${ex.barcode})` });
+      if (ex) return res.json({ ok: false, message: `Barcode already used by: ${ex.name} (${ex.barcode})` });
     }
-    return res.json({ ok:false, message:`Create failed: ${String(e.message||e)}` });
+    return res.json({ ok: false, message: `Create failed: ${String(e.message || e)}` });
   }
 });
 
@@ -455,8 +571,9 @@ app.post("/products/:id/adjust-stock", auth, (req, res) => {
     qty: z.coerce.number(),
     note: z.string().optional().default("ADJUSTMENT")
   });
+
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid input" });
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
 
   const { qty, note } = parsed.data;
 
@@ -477,18 +594,183 @@ app.post("/products/:id/adjust-stock", auth, (req, res) => {
     return { id, stock: newStock };
   });
 
-  try { return res.json({ ok:true, result: tx() }); }
-  catch(e){ return res.json({ ok:false, message:String(e.message||e) }); }
+  try {
+    return res.json({ ok: true, result: tx() });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+app.put("/products/:id/ecommerce", auth, (req, res) => {
+  const id = Number(req.params.id);
+  const schema = z.object({
+    category_id: z.number().nullable().optional(),
+    image_url: z.string().optional().default("")
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid ecommerce product data" });
+
+  db.prepare(`
+    UPDATE products
+    SET category_id=?, image_url=?
+    WHERE id=?
+  `).run(parsed.data.category_id || null, parsed.data.image_url || "", id);
+
+  res.json({ ok: true });
 });
 
 app.delete("/products/:id", auth, (req, res) => {
   const id = Number(req.params.id);
   db.prepare("UPDATE products SET active=0 WHERE id=?").run(id);
-  res.json({ ok:true });
+  res.json({ ok: true });
 });
 
 // ==============================
 // CUSTOMERS
+// ==============================
+app.get("/customers", auth, (req, res) => {
+  const rows = db.prepare(`
+    SELECT *
+    FROM customers
+    ORDER BY id DESC
+  `).all();
+
+  res.json({ ok: true, customers: rows });
+});
+
+app.post("/customers", auth, (req, res) => {
+  const schema = z.object({
+    name: z.string().min(1),
+    phone: z.string().optional().default(""),
+    email: z.string().optional().default(""),
+    kra_pin: z.string().optional().default(""),
+    account_balance: z.coerce.number().min(0).optional().default(0),
+    credit_limit: z.coerce.number().min(0).optional().default(0),
+    allow_credit: z.coerce.number().optional().default(0),
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
+
+  const c = parsed.data;
+
+  db.prepare(`
+    INSERT INTO customers (
+      name, phone, email, kra_pin, loyalty_points,
+      account_balance, credit_limit, credit_used, allow_credit
+    ) VALUES (?,?,?,?,0,?,?,0,?)
+  `).run(
+    c.name.trim(),
+    c.phone.trim(),
+    c.email.trim(),
+    c.kra_pin.trim(),
+    c.account_balance,
+    c.credit_limit,
+    c.allow_credit ? 1 : 0
+  );
+
+  res.json({ ok: true });
+});
+
+app.post("/customers/:id/topup", auth, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const schema = z.object({
+      amount: z.coerce.number().positive(),
+      note: z.string().optional().default("Account Top-up"),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid top-up data" });
+
+    const customer = db.prepare("SELECT * FROM customers WHERE id=?").get(id);
+    if (!customer) return res.json({ ok: false, message: "Customer not found" });
+
+    db.prepare(`
+      UPDATE customers
+      SET account_balance = account_balance + ?
+      WHERE id=?
+    `).run(parsed.data.amount, id);
+
+    return res.json({ ok: true, message: "Customer account topped up" });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+app.put("/customers/:id/credit-settings", auth, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const schema = z.object({
+      allow_credit: z.coerce.number().optional().default(0),
+      credit_limit: z.coerce.number().min(0).optional().default(0),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid credit settings" });
+
+    const customer = db.prepare("SELECT * FROM customers WHERE id=?").get(id);
+    if (!customer) return res.json({ ok: false, message: "Customer not found" });
+
+    db.prepare(`
+      UPDATE customers
+      SET allow_credit=?, credit_limit=?
+      WHERE id=?
+    `).run(parsed.data.allow_credit ? 1 : 0, parsed.data.credit_limit, id);
+
+    return res.json({ ok: true, message: "Credit settings updated" });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+app.get("/customers/:id/account-summary", auth, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const customer = db.prepare(`
+      SELECT id, name, phone, email, kra_pin, loyalty_points,
+             account_balance, credit_limit, credit_used, allow_credit
+      FROM customers
+      WHERE id=?
+    `).get(id);
+
+    if (!customer) return res.json({ ok: false, message: "Customer not found" });
+
+    return res.json({ ok: true, customer });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+// ==============================
+// SUPPLIERS
+// ==============================
+app.get("/suppliers", auth, (req, res) => {
+  const rows = db.prepare("SELECT * FROM suppliers ORDER BY id DESC").all();
+  res.json({ ok: true, suppliers: rows });
+});
+
+app.post("/suppliers", auth, (req, res) => {
+  const schema = z.object({
+    name: z.string().min(1),
+    phone: z.string().optional().default(""),
+    email: z.string().optional().default(""),
+    kra_pin: z.string().optional().default("")
+  });
+
+  const parsed = schema.safeParse(req.body);
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
+
+  const s = parsed.data;
+  db.prepare("INSERT INTO suppliers (name, phone, email, kra_pin) VALUES (?,?,?,?)")
+    .run(s.name.trim(), s.phone.trim(), s.email.trim(), s.kra_pin.trim());
+
+  res.json({ ok: true });
+});
+
+// ==============================
+// POS
 // ==============================
 app.post("/pos/complete-sale", auth, (req, res) => {
   const schema = z.object({
@@ -498,7 +780,7 @@ app.post("/pos/complete-sale", auth, (req, res) => {
       price: z.number().nonnegative()
     })).min(1),
     customer_id: z.number().nullable().optional(),
-    payment_mode: z.enum(["Cash","Mpesa","Bank","Cheque","Account","Credit"]),
+    payment_mode: z.enum(["Cash", "Mpesa", "Bank", "Cheque", "Account", "Credit"]),
     payment_ref: z.string().optional().default(""),
     amount_paid: z.number().nonnegative().optional().default(0)
   });
@@ -538,14 +820,12 @@ app.post("/pos/complete-sale", auth, (req, res) => {
   }
 
   const tx = db.transaction(() => {
-    // stock check
     for (const it of sale.items) {
       const p = db.prepare("SELECT id,name,stock FROM products WHERE id=? AND active=1").get(it.product_id);
       if (!p) throw new Error("Product not found");
       if (Number(p.stock) < it.qty) throw new Error("Insufficient stock for " + p.name);
     }
 
-    // customer checks for Account/Credit
     let customer = null;
     if (sale.customer_id) {
       customer = db.prepare("SELECT * FROM customers WHERE id=?").get(sale.customer_id);
@@ -627,6 +907,13 @@ app.post("/pos/complete-sale", auth, (req, res) => {
       }
     }
 
+    if (["Cash", "Mpesa", "Bank", "Cheque", "Account"].includes(sale.payment_mode)) {
+      db.prepare(`
+        INSERT INTO payments (source, ref, mode, pay_ref, amount)
+        VALUES ('POS', ?, ?, ?, ?)
+      `).run(receipt_no, sale.payment_mode, sale.payment_ref || "", total);
+    }
+
     return { sale_id, receipt_no, total, change_given, payment_mode: sale.payment_mode };
   });
 
@@ -645,12 +932,12 @@ app.get("/pos/receipts", auth, (req, res) => {
     ORDER BY id DESC
     LIMIT ?
   `).all(limit);
-  res.json({ ok:true, receipts: rows });
+  res.json({ ok: true, receipts: rows });
 });
 
 app.get("/pos/receipt/:receiptNo", auth, (req, res) => {
   const receiptNo = String(req.params.receiptNo || "").trim();
-  if (!receiptNo) return res.json({ ok:false, message:"Receipt number required" });
+  if (!receiptNo) return res.json({ ok: false, message: "Receipt number required" });
 
   const company = db.prepare("SELECT * FROM company WHERE id=1").get();
 
@@ -661,7 +948,7 @@ app.get("/pos/receipt/:receiptNo", auth, (req, res) => {
     WHERE s.receipt_no = ?
   `).get(receiptNo);
 
-  if (!sale) return res.json({ ok:false, message:"Receipt not found" });
+  if (!sale) return res.json({ ok: false, message: "Receipt not found" });
 
   const items = db.prepare(`
     SELECT name, barcode, qty, price, subtotal
@@ -670,13 +957,12 @@ app.get("/pos/receipt/:receiptNo", auth, (req, res) => {
     ORDER BY id ASC
   `).all(sale.id);
 
-  res.json({ ok:true, company, sale, items });
+  res.json({ ok: true, company, sale, items });
 });
 
-// Public receipt lookup for QR scanning (no auth)
 app.get("/public/receipt/:receiptNo", (req, res) => {
   const receiptNo = String(req.params.receiptNo || "").trim();
-  if (!receiptNo) return res.status(400).json({ ok:false, message:"Receipt number required" });
+  if (!receiptNo) return res.status(400).json({ ok: false, message: "Receipt number required" });
 
   const company = db.prepare("SELECT name, kra_pin, phone, location, receipt_footer FROM company WHERE id=1").get();
 
@@ -685,7 +971,7 @@ app.get("/public/receipt/:receiptNo", (req, res) => {
     FROM pos_sales WHERE receipt_no=?
   `).get(receiptNo);
 
-  if (!sale) return res.status(404).json({ ok:false, message:"Receipt not found" });
+  if (!sale) return res.status(404).json({ ok: false, message: "Receipt not found" });
 
   const items = db.prepare(`
     SELECT name, qty, price, subtotal, barcode
@@ -694,7 +980,7 @@ app.get("/public/receipt/:receiptNo", (req, res) => {
     ORDER BY id ASC
   `).all(receiptNo);
 
-  return res.json({ ok:true, company, sale, items });
+  return res.json({ ok: true, company, sale, items });
 });
 
 // ==============================
@@ -706,7 +992,8 @@ app.get("/reports/pos/daily-total", auth, (req, res) => {
     FROM pos_sales
     WHERE date(created_at) = date('now')
   `).get();
-  res.json({ ok:true, total:Number(row?.total||0) });
+
+  res.json({ ok: true, total: Number(row?.total || 0) });
 });
 
 app.get("/reports/pos/items-sold", auth, (req, res) => {
@@ -717,11 +1004,12 @@ app.get("/reports/pos/items-sold", auth, (req, res) => {
     GROUP BY name
     ORDER BY qty DESC
   `).all();
-  res.json({ ok:true, items: rows });
+
+  res.json({ ok: true, items: rows });
 });
 
 // ==============================
-// PURCHASE RFQ → RECEIVE
+// PURCHASE
 // ==============================
 app.get("/purchase/rfqs", auth, (req, res) => {
   const rows = db.prepare(`
@@ -731,7 +1019,8 @@ app.get("/purchase/rfqs", auth, (req, res) => {
     ORDER BY p.id DESC
     LIMIT 200
   `).all();
-  res.json({ ok:true, rfqs: rows });
+
+  res.json({ ok: true, rfqs: rows });
 });
 
 app.post("/purchase/rfqs", auth, (req, res) => {
@@ -739,14 +1028,15 @@ app.post("/purchase/rfqs", auth, (req, res) => {
     supplier_id: z.number().nullable().optional(),
     note: z.string().optional().default("")
   });
+
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid input" });
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
 
   const po_no = nextNo("po", "PO-");
   db.prepare("INSERT INTO purchase_orders (po_no, supplier_id, note) VALUES (?,?,?)")
     .run(po_no, parsed.data.supplier_id || null, parsed.data.note);
 
-  res.json({ ok:true, po_no });
+  res.json({ ok: true, po_no });
 });
 
 app.get("/purchase/rfqs/:poNo", auth, (req, res) => {
@@ -757,7 +1047,8 @@ app.get("/purchase/rfqs/:poNo", auth, (req, res) => {
     LEFT JOIN suppliers s ON s.id=p.supplier_id
     WHERE p.po_no=?
   `).get(poNo);
-  if (!po) return res.json({ ok:false, message:"Not found" });
+
+  if (!po) return res.json({ ok: false, message: "Not found" });
 
   const items = db.prepare(`
     SELECT i.*, pr.name AS product_name, pr.barcode AS barcode
@@ -767,7 +1058,7 @@ app.get("/purchase/rfqs/:poNo", auth, (req, res) => {
     ORDER BY i.id ASC
   `).all(po.id);
 
-  res.json({ ok:true, po, items });
+  res.json({ ok: true, po, items });
 });
 
 app.post("/purchase/rfqs/:poNo/add-item", auth, (req, res) => {
@@ -777,15 +1068,16 @@ app.post("/purchase/rfqs/:poNo/add-item", auth, (req, res) => {
     qty: z.coerce.number().positive(),
     cost: z.coerce.number().min(0)
   });
+
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid item" });
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid item" });
 
   const po = db.prepare("SELECT * FROM purchase_orders WHERE po_no=?").get(poNo);
-  if (!po) return res.json({ ok:false, message:"RFQ not found" });
-  if (po.status !== "RFQ") return res.json({ ok:false, message:"Cannot edit after confirm" });
+  if (!po) return res.json({ ok: false, message: "RFQ not found" });
+  if (po.status !== "RFQ") return res.json({ ok: false, message: "Cannot edit after confirm" });
 
   const p = db.prepare("SELECT id FROM products WHERE id=? AND active=1").get(parsed.data.product_id);
-  if (!p) return res.json({ ok:false, message:"Product not found" });
+  if (!p) return res.json({ ok: false, message: "Product not found" });
 
   const subtotal = sum2(parsed.data.qty * parsed.data.cost);
   db.prepare(`
@@ -793,26 +1085,26 @@ app.post("/purchase/rfqs/:poNo/add-item", auth, (req, res) => {
     VALUES (?,?,?,?,?)
   `).run(po.id, parsed.data.product_id, parsed.data.qty, parsed.data.cost, subtotal);
 
-  res.json({ ok:true });
+  res.json({ ok: true });
 });
 
 app.post("/purchase/rfqs/:poNo/confirm", auth, (req, res) => {
   const poNo = String(req.params.poNo || "").trim();
   const po = db.prepare("SELECT * FROM purchase_orders WHERE po_no=?").get(poNo);
-  if (!po) return res.json({ ok:false, message:"RFQ not found" });
+  if (!po) return res.json({ ok: false, message: "RFQ not found" });
 
   db.prepare("UPDATE purchase_orders SET status='CONFIRMED' WHERE id=?").run(po.id);
-  res.json({ ok:true });
+  res.json({ ok: true });
 });
 
 app.post("/purchase/rfqs/:poNo/receive", auth, (req, res) => {
   const poNo = String(req.params.poNo || "").trim();
   const po = db.prepare("SELECT * FROM purchase_orders WHERE po_no=?").get(poNo);
-  if (!po) return res.json({ ok:false, message:"RFQ not found" });
-  if (po.status === "RECEIVED") return res.json({ ok:false, message:"Already received" });
+  if (!po) return res.json({ ok: false, message: "RFQ not found" });
+  if (po.status === "RECEIVED") return res.json({ ok: false, message: "Already received" });
 
   const items = db.prepare("SELECT * FROM purchase_order_items WHERE po_id=?").all(po.id);
-  if (items.length === 0) return res.json({ ok:false, message:"No items" });
+  if (items.length === 0) return res.json({ ok: false, message: "No items" });
 
   const tx = db.transaction(() => {
     for (const it of items) {
@@ -822,21 +1114,25 @@ app.post("/purchase/rfqs/:poNo/receive", auth, (req, res) => {
         VALUES ('PURCHASE_RECEIPT', ?, ?, ?, 'PO Receive')
       `).run(poNo, it.product_id, it.qty);
 
-      // accounting: purchase (simple)
       db.prepare(`
         INSERT INTO journal_entries (ref, journal_code, entry_type, amount, note)
         VALUES (?, 'PURCHASE', 'DEBIT', ?, 'PO Receipt')
       `).run(poNo, sum2(it.subtotal));
     }
+
     db.prepare("UPDATE purchase_orders SET status='RECEIVED' WHERE id=?").run(po.id);
   });
 
-  try { tx(); return res.json({ ok:true }); }
-  catch(e){ return res.json({ ok:false, message:String(e.message||e) }); }
+  try {
+    tx();
+    return res.json({ ok: true });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
 });
 
 // ==============================
-// SALES FLOW (Quote → SO → DN → Invoice)
+// SALES
 // ==============================
 app.get("/sales/quotes", auth, (req, res) => {
   const rows = db.prepare(`
@@ -846,7 +1142,8 @@ app.get("/sales/quotes", auth, (req, res) => {
     ORDER BY q.id DESC
     LIMIT 200
   `).all();
-  res.json({ ok:true, quotes: rows });
+
+  res.json({ ok: true, quotes: rows });
 });
 
 app.post("/sales/quotes", auth, (req, res) => {
@@ -854,14 +1151,15 @@ app.post("/sales/quotes", auth, (req, res) => {
     customer_id: z.number().nullable().optional(),
     note: z.string().optional().default("")
   });
+
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid input" });
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
 
   const quote_no = nextNo("quote", "Q-");
   db.prepare("INSERT INTO sales_quotes (quote_no, customer_id, note) VALUES (?,?,?)")
     .run(quote_no, parsed.data.customer_id || null, parsed.data.note);
 
-  res.json({ ok:true, quote_no });
+  res.json({ ok: true, quote_no });
 });
 
 app.get("/sales/quotes/:quoteNo", auth, (req, res) => {
@@ -872,7 +1170,8 @@ app.get("/sales/quotes/:quoteNo", auth, (req, res) => {
     LEFT JOIN customers c ON c.id=q.customer_id
     WHERE q.quote_no=?
   `).get(quoteNo);
-  if (!q) return res.json({ ok:false, message:"Not found" });
+
+  if (!q) return res.json({ ok: false, message: "Not found" });
 
   const items = db.prepare(`
     SELECT i.*, p.name AS product_name, p.barcode AS barcode
@@ -882,7 +1181,7 @@ app.get("/sales/quotes/:quoteNo", auth, (req, res) => {
     ORDER BY i.id ASC
   `).all(q.id);
 
-  res.json({ ok:true, quote:q, items });
+  res.json({ ok: true, quote: q, items });
 });
 
 app.post("/sales/quotes/:quoteNo/add-item", auth, (req, res) => {
@@ -892,15 +1191,16 @@ app.post("/sales/quotes/:quoteNo/add-item", auth, (req, res) => {
     qty: z.coerce.number().positive(),
     price: z.coerce.number().min(0)
   });
+
   const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok:false, message:"Invalid item" });
+  if (!parsed.success) return res.json({ ok: false, message: "Invalid item" });
 
   const q = db.prepare("SELECT * FROM sales_quotes WHERE quote_no=?").get(quoteNo);
-  if (!q) return res.json({ ok:false, message:"Quote not found" });
-  if (q.status !== "DRAFT") return res.json({ ok:false, message:"Cannot edit confirmed quote" });
+  if (!q) return res.json({ ok: false, message: "Quote not found" });
+  if (q.status !== "DRAFT") return res.json({ ok: false, message: "Cannot edit confirmed quote" });
 
   const p = db.prepare("SELECT id FROM products WHERE id=? AND active=1").get(parsed.data.product_id);
-  if (!p) return res.json({ ok:false, message:"Product not found" });
+  if (!p) return res.json({ ok: false, message: "Product not found" });
 
   const subtotal = sum2(parsed.data.qty * parsed.data.price);
   db.prepare(`
@@ -908,17 +1208,17 @@ app.post("/sales/quotes/:quoteNo/add-item", auth, (req, res) => {
     VALUES (?,?,?,?,?)
   `).run(q.id, parsed.data.product_id, parsed.data.qty, parsed.data.price, subtotal);
 
-  res.json({ ok:true });
+  res.json({ ok: true });
 });
 
 app.post("/sales/quotes/:quoteNo/confirm", auth, (req, res) => {
   const quoteNo = String(req.params.quoteNo || "").trim();
   const q = db.prepare("SELECT * FROM sales_quotes WHERE quote_no=?").get(quoteNo);
-  if (!q) return res.json({ ok:false, message:"Quote not found" });
-  if (q.status !== "DRAFT") return res.json({ ok:false, message:"Already confirmed" });
+  if (!q) return res.json({ ok: false, message: "Quote not found" });
+  if (q.status !== "DRAFT") return res.json({ ok: false, message: "Already confirmed" });
 
   const items = db.prepare("SELECT * FROM sales_quote_items WHERE quote_id=?").all(q.id);
-  if (items.length === 0) return res.json({ ok:false, message:"Quote has no items" });
+  if (items.length === 0) return res.json({ ok: false, message: "Quote has no items" });
 
   const so_no = nextNo("so", "SO-");
 
@@ -937,8 +1237,12 @@ app.post("/sales/quotes/:quoteNo/confirm", auth, (req, res) => {
     }
   });
 
-  try { tx(); return res.json({ ok:true, so_no }); }
-  catch(e){ return res.json({ ok:false, message:String(e.message||e) }); }
+  try {
+    tx();
+    return res.json({ ok: true, so_no });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
 });
 
 app.get("/sales/orders", auth, (req, res) => {
@@ -949,7 +1253,8 @@ app.get("/sales/orders", auth, (req, res) => {
     ORDER BY o.id DESC
     LIMIT 200
   `).all();
-  res.json({ ok:true, orders: rows });
+
+  res.json({ ok: true, orders: rows });
 });
 
 app.get("/sales/orders/:soNo", auth, (req, res) => {
@@ -960,7 +1265,8 @@ app.get("/sales/orders/:soNo", auth, (req, res) => {
     LEFT JOIN customers c ON c.id=o.customer_id
     WHERE o.so_no=?
   `).get(soNo);
-  if (!o) return res.json({ ok:false, message:"Not found" });
+
+  if (!o) return res.json({ ok: false, message: "Not found" });
 
   const items = db.prepare(`
     SELECT i.*, p.name AS product_name, p.barcode AS barcode
@@ -970,23 +1276,22 @@ app.get("/sales/orders/:soNo", auth, (req, res) => {
     ORDER BY i.id ASC
   `).all(o.id);
 
-  res.json({ ok:true, order:o, items });
+  res.json({ ok: true, order: o, items });
 });
 
 app.post("/sales/orders/:soNo/deliver", auth, (req, res) => {
   const soNo = String(req.params.soNo || "").trim();
   const o = db.prepare("SELECT * FROM sales_orders WHERE so_no=?").get(soNo);
-  if (!o) return res.json({ ok:false, message:"Sales order not found" });
-  if (o.status === "DELIVERED") return res.json({ ok:false, message:"Already delivered" });
+  if (!o) return res.json({ ok: false, message: "Sales order not found" });
+  if (o.status === "DELIVERED") return res.json({ ok: false, message: "Already delivered" });
 
   const items = db.prepare("SELECT * FROM sales_order_items WHERE so_id=?").all(o.id);
-  if (items.length === 0) return res.json({ ok:false, message:"No items" });
+  if (items.length === 0) return res.json({ ok: false, message: "No items" });
 
-  // check stock
   for (const it of items) {
     const p = db.prepare("SELECT stock, name FROM products WHERE id=? AND active=1").get(it.product_id);
-    if (!p) return res.json({ ok:false, message:"Product missing" });
-    if (Number(p.stock) < Number(it.qty)) return res.json({ ok:false, message:`Insufficient stock for ${p.name}` });
+    if (!p) return res.json({ ok: false, message: "Product missing" });
+    if (Number(p.stock) < Number(it.qty)) return res.json({ ok: false, message: `Insufficient stock for ${p.name}` });
   }
 
   const dn_no = nextNo("dn", "DN-");
@@ -1011,25 +1316,28 @@ app.post("/sales/orders/:soNo/deliver", auth, (req, res) => {
     db.prepare("UPDATE sales_orders SET status='DELIVERED' WHERE id=?").run(o.id);
   });
 
-  try { tx(); return res.json({ ok:true, dn_no }); }
-  catch(e){ return res.json({ ok:false, message:String(e.message||e) }); }
+  try {
+    tx();
+    return res.json({ ok: true, dn_no });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
 });
 
 app.post("/sales/orders/:soNo/invoice", auth, (req, res) => {
   const soNo = String(req.params.soNo || "").trim();
   const o = db.prepare("SELECT * FROM sales_orders WHERE so_no=?").get(soNo);
-  if (!o) return res.json({ ok:false, message:"Sales order not found" });
-  if (o.status !== "DELIVERED") return res.json({ ok:false, message:"Invoice only after Delivery Note" });
+  if (!o) return res.json({ ok: false, message: "Sales order not found" });
+  if (o.status !== "DELIVERED") return res.json({ ok: false, message: "Invoice only after Delivery Note" });
 
   const dn = db.prepare("SELECT * FROM delivery_notes WHERE so_no=? ORDER BY id DESC LIMIT 1").get(soNo);
-  if (!dn) return res.json({ ok:false, message:"No delivery note found" });
+  if (!dn) return res.json({ ok: false, message: "No delivery note found" });
 
   const exists = db.prepare("SELECT inv_no FROM invoices WHERE dn_no=?").get(dn.dn_no);
-  if (exists) return res.json({ ok:false, message:"Invoice already posted: " + exists.inv_no });
+  if (exists) return res.json({ ok: false, message: "Invoice already posted: " + exists.inv_no });
 
   const items = db.prepare("SELECT * FROM sales_order_items WHERE so_id=?").all(o.id);
   const total = sum2(items.reduce((s, it) => s + Number(it.subtotal || 0), 0));
-
   const inv_no = nextNo("inv", "INV-");
 
   const tx = db.transaction(() => {
@@ -1043,19 +1351,22 @@ app.post("/sales/orders/:soNo/invoice", auth, (req, res) => {
       `).run(inv_no, it.product_id, it.qty, it.price, it.subtotal);
     }
 
-    // accounting: invoice (credit sales)
     db.prepare(`
       INSERT INTO journal_entries (ref, journal_code, entry_type, amount, note)
       VALUES (?, 'SALES', 'CREDIT', ?, 'Invoice Posted')
     `).run(inv_no, total);
   });
 
-  try { tx(); return res.json({ ok:true, inv_no, total, dn_no: dn.dn_no }); }
-  catch(e){ return res.json({ ok:false, message:String(e.message||e) }); }
+  try {
+    tx();
+    return res.json({ ok: true, inv_no, total, dn_no: dn.dn_no });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
+  }
 });
 
 // ==============================
-// PRINT DATA (DN + INVOICE) - FIXED TABLES
+// PRINT DATA
 // ==============================
 app.get("/sales/dn/:dnNo", auth, (req, res) => {
   try {
@@ -1068,7 +1379,7 @@ app.get("/sales/dn/:dnNo", auth, (req, res) => {
       WHERE dn.dn_no = ?
     `).get(dnNo);
 
-    if (!dn) return res.status(404).json({ ok:false, message:"DN not found" });
+    if (!dn) return res.status(404).json({ ok: false, message: "DN not found" });
 
     const items = db.prepare(`
       SELECT i.*, p.name AS product_name, p.reference, p.barcode
@@ -1080,10 +1391,10 @@ app.get("/sales/dn/:dnNo", auth, (req, res) => {
 
     const company = db.prepare("SELECT * FROM company WHERE id=1").get();
 
-    return res.json({ ok:true, dn, items, company });
+    return res.json({ ok: true, dn, items, company });
   } catch (e) {
     console.error("DN print error:", e);
-    return res.status(500).json({ ok:false, message:"Server error (DN print)" });
+    return res.status(500).json({ ok: false, message: "Server error (DN print)" });
   }
 });
 
@@ -1092,13 +1403,13 @@ app.get("/sales/invoices/:invNo", auth, (req, res) => {
     const invNo = String(req.params.invNo || "").trim();
 
     const inv = db.prepare(`
-    SELECT inv.*, c.name AS customer_name, c.kra_pin AS customer_kra_pin
-    FROM invoices inv
-    LEFT JOIN customers c ON c.id = inv.customer_id
-    WHERE inv.inv_no = ?
-  `).get(invNo);
+      SELECT inv.*, c.name AS customer_name, c.kra_pin AS customer_kra_pin
+      FROM invoices inv
+      LEFT JOIN customers c ON c.id = inv.customer_id
+      WHERE inv.inv_no = ?
+    `).get(invNo);
 
-    if (!inv) return res.status(404).json({ ok:false, message:"Invoice not found" });
+    if (!inv) return res.status(404).json({ ok: false, message: "Invoice not found" });
 
     const dn = db.prepare("SELECT * FROM delivery_notes WHERE dn_no=?").get(inv.dn_no);
     const so = dn ? db.prepare("SELECT * FROM sales_orders WHERE so_no=?").get(dn.so_no) : null;
@@ -1113,15 +1424,15 @@ app.get("/sales/invoices/:invNo", auth, (req, res) => {
 
     const company = db.prepare("SELECT * FROM company WHERE id=1").get();
 
-    return res.json({ ok:true, inv, dn, so, items, company });
+    return res.json({ ok: true, inv, dn, so, items, company });
   } catch (e) {
     console.error("INV print error:", e);
-    return res.status(500).json({ ok:false, message:"Server error (Invoice print)" });
+    return res.status(500).json({ ok: false, message: "Server error (Invoice print)" });
   }
 });
 
 // ==============================
-// INVENTORY OVERVIEW
+// INVENTORY
 // ==============================
 app.get("/inventory/overview", auth, (req, res) => {
   const products = db.prepare(`
@@ -1141,11 +1452,11 @@ app.get("/inventory/overview", auth, (req, res) => {
     LIMIT 300
   `).all();
 
-  res.json({ ok:true, products, moves });
+  res.json({ ok: true, products, moves });
 });
 
 // ==============================
-// ACCOUNTING (API READY FOR UI NEXT)
+// ACCOUNTING
 // ==============================
 app.get("/accounting/summary/today", auth, (req, res) => {
   const sales = db.prepare(`
@@ -1168,29 +1479,13 @@ app.get("/accounting/summary/today", auth, (req, res) => {
   `).all();
 
   res.json({
-    ok:true,
-    pos_total: Number(sales?.total||0),
-    invoice_total: Number(invoices?.total||0),
-    payments_by_mode: byMode.map(r=>({ mode:r.mode, total:Number(r.total||0) }))
+    ok: true,
+    pos_total: Number(sales?.total || 0),
+    invoice_total: Number(invoices?.total || 0),
+    payments_by_mode: byMode.map(r => ({ mode: r.mode, total: Number(r.total || 0) }))
   });
 });
 
-// Website placeholder endpoints (next step we build UI)
-app.get("/website/products", (req, res) => {
-  const rows = db.prepare(`
-    SELECT id, name, reference, barcode, price, stock
-    FROM products
-    WHERE active=1
-    ORDER BY id DESC
-    LIMIT 2000
-  `).all();
-  res.json({ ok:true, products: rows });
-});
-// ==============================
-// ACCOUNTING EXTRA ROUTES
-// ==============================
-
-// Invoices list
 app.get("/accounting/invoices", auth, (req, res) => {
   const rows = db.prepare(`
     SELECT inv.*, c.name AS customer_name, c.kra_pin AS customer_kra_pin
@@ -1203,7 +1498,6 @@ app.get("/accounting/invoices", auth, (req, res) => {
   res.json({ ok: true, invoices: rows });
 });
 
-// POS sales list
 app.get("/accounting/pos-sales", auth, (req, res) => {
   const rows = db.prepare(`
     SELECT s.*, c.name AS customer_name
@@ -1216,10 +1510,10 @@ app.get("/accounting/pos-sales", auth, (req, res) => {
   res.json({ ok: true, sales: rows });
 });
 
-// Customer balances / accounts
 app.get("/accounting/customers", auth, (req, res) => {
   const customers = db.prepare(`
     SELECT c.id, c.name, c.phone, c.email, c.kra_pin, c.loyalty_points,
+           c.account_balance, c.credit_limit, c.credit_used, c.allow_credit,
       COALESCE((
         SELECT SUM(total) FROM invoices i WHERE i.customer_id = c.id
       ),0) AS invoiced_total,
@@ -1243,7 +1537,6 @@ app.get("/accounting/customers", auth, (req, res) => {
   res.json({ ok: true, customers });
 });
 
-// Supplier balances / accounts
 app.get("/accounting/suppliers", auth, (req, res) => {
   const suppliers = db.prepare(`
     SELECT s.id, s.name, s.phone, s.email, s.kra_pin,
@@ -1263,12 +1556,9 @@ app.get("/accounting/suppliers", auth, (req, res) => {
   res.json({ ok: true, suppliers });
 });
 
-// Customer statement
 app.get("/accounting/customer-statement/:id", auth, (req, res) => {
   const id = Number(req.params.id);
-  const customer = db.prepare(`
-    SELECT * FROM customers WHERE id=?
-  `).get(id);
+  const customer = db.prepare(`SELECT * FROM customers WHERE id=?`).get(id);
 
   if (!customer) return res.json({ ok: false, message: "Customer not found" });
 
@@ -1285,7 +1575,6 @@ app.get("/accounting/customer-statement/:id", auth, (req, res) => {
   `).all(id);
 
   const rows = [...invoices, ...pos].sort((a, b) => String(a.created_at).localeCompare(String(b.created_at)));
-
   const totalInvoiced = rows.reduce((s, r) => s + Number(r.amount || 0), 0);
 
   res.json({
@@ -1296,12 +1585,9 @@ app.get("/accounting/customer-statement/:id", auth, (req, res) => {
   });
 });
 
-// Supplier statement
 app.get("/accounting/supplier-statement/:id", auth, (req, res) => {
   const id = Number(req.params.id);
-  const supplier = db.prepare(`
-    SELECT * FROM suppliers WHERE id=?
-  `).get(id);
+  const supplier = db.prepare(`SELECT * FROM suppliers WHERE id=?`).get(id);
 
   if (!supplier) return res.json({ ok: false, message: "Supplier not found" });
 
@@ -1329,7 +1615,6 @@ app.get("/accounting/supplier-statement/:id", auth, (req, res) => {
   });
 });
 
-// Margin / profit summary
 app.get("/accounting/margins", auth, (req, res) => {
   const posMargin = db.prepare(`
     SELECT 
@@ -1381,7 +1666,6 @@ app.get("/accounting/margins", auth, (req, res) => {
   });
 });
 
-// Accounting dashboard combined
 app.get("/accounting/dashboard", auth, (req, res) => {
   const posToday = db.prepare(`
     SELECT COALESCE(SUM(total),0) AS total
@@ -1446,39 +1730,15 @@ app.get("/accounting/dashboard", auth, (req, res) => {
     recent_pos: recentPos
   });
 });
+
 // ==============================
 // WEBSITE / ECOMMERCE
 // ==============================
-db.exec(`
-CREATE TABLE IF NOT EXISTS website_settings (
-  id INTEGER PRIMARY KEY CHECK (id = 1),
-  store_name TEXT NOT NULL DEFAULT 'Broesta Shop',
-  hero_title TEXT NOT NULL DEFAULT 'Welcome to Broesta Shop',
-  hero_subtitle TEXT NOT NULL DEFAULT 'Quality products at the best prices',
-  about_text TEXT NOT NULL DEFAULT 'We serve our customers with excellence.',
-  whatsapp TEXT NOT NULL DEFAULT '',
-  facebook TEXT NOT NULL DEFAULT '',
-  instagram TEXT NOT NULL DEFAULT '',
-  tiktok TEXT NOT NULL DEFAULT '',
-  logo_url TEXT NOT NULL DEFAULT '',
-  banner_url TEXT NOT NULL DEFAULT '',
-  theme_color TEXT NOT NULL DEFAULT '#0b5bd3',
-  contact_phone TEXT NOT NULL DEFAULT '',
-  contact_email TEXT NOT NULL DEFAULT '',
-  contact_location TEXT NOT NULL DEFAULT ''
-);
-`);
-
-const ws = db.prepare("SELECT id FROM website_settings WHERE id=1").get();
-if (!ws) db.prepare("INSERT INTO website_settings (id) VALUES (1)").run();
-
-// public settings
 app.get("/website/settings", (req, res) => {
   const settings = db.prepare("SELECT * FROM website_settings WHERE id=1").get();
   res.json({ ok: true, settings });
 });
 
-// admin update settings
 app.put("/website/settings", auth, (req, res) => {
   const schema = z.object({
     store_name: z.string().min(1),
@@ -1538,74 +1798,6 @@ app.put("/website/settings", auth, (req, res) => {
   res.json({ ok: true });
 });
 
-// public shop products
-app.get("/shop/products", (req, res) => {
-  const rows = db.prepare(`
-    SELECT id, name, reference, barcode, price, stock, tax_type, tax_rate
-    FROM products
-    WHERE active=1 AND stock > 0
-    ORDER BY id DESC
-    LIMIT 2000
-  `).all();
-
-  res.json({ ok: true, products: rows });
-});
-// ==============================
-// ECOMMERCE PRODUCTS EXTENSIONS
-// ==============================
-db.exec(`
-CREATE TABLE IF NOT EXISTS categories (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  name TEXT UNIQUE NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS product_images (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  product_id INTEGER NOT NULL,
-  image_url TEXT NOT NULL,
-  created_at TEXT NOT NULL DEFAULT (datetime('now')),
-  FOREIGN KEY (product_id) REFERENCES products(id) ON DELETE CASCADE
-);
-
-CREATE TABLE IF NOT EXISTS website_orders (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_no TEXT UNIQUE NOT NULL,
-  customer_name TEXT NOT NULL,
-  customer_phone TEXT NOT NULL,
-  customer_email TEXT NOT NULL DEFAULT '',
-  delivery_location TEXT NOT NULL DEFAULT '',
-  note TEXT NOT NULL DEFAULT '',
-  total REAL NOT NULL DEFAULT 0,
-  status TEXT NOT NULL DEFAULT 'NEW' CHECK(status IN ('NEW','CONFIRMED','PROCESSING','COMPLETED','CANCELLED')),
-  created_at TEXT NOT NULL DEFAULT (datetime('now'))
-);
-
-CREATE TABLE IF NOT EXISTS website_order_items (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
-  order_id INTEGER NOT NULL,
-  product_id INTEGER NOT NULL,
-  product_name TEXT NOT NULL,
-  qty REAL NOT NULL CHECK(qty > 0),
-  price REAL NOT NULL CHECK(price >= 0),
-  subtotal REAL NOT NULL CHECK(subtotal >= 0),
-  FOREIGN KEY (order_id) REFERENCES website_orders(id) ON DELETE CASCADE,
-  FOREIGN KEY (product_id) REFERENCES products(id)
-);
-`);
-// ==============================
-// SAFE SCHEMA UPGRADES - PHASE A/B
-// ==============================
-try { db.prepare("ALTER TABLE customers ADD COLUMN account_balance REAL NOT NULL DEFAULT 0").run(); } catch {}
-try { db.prepare("ALTER TABLE customers ADD COLUMN credit_limit REAL NOT NULL DEFAULT 0").run(); } catch {}
-try { db.prepare("ALTER TABLE customers ADD COLUMN credit_used REAL NOT NULL DEFAULT 0").run(); } catch {}
-try { db.prepare("ALTER TABLE customers ADD COLUMN allow_credit INTEGER NOT NULL DEFAULT 0").run(); } catch {}
-try { db.prepare("ALTER TABLE products ADD COLUMN category_id INTEGER").run(); } catch {}
-try { db.prepare("ALTER TABLE products ADD COLUMN image_url TEXT NOT NULL DEFAULT ''").run(); } catch {}
-
-ensureCounter("weborder");
-
-// categories
 app.get("/categories", auth, (req, res) => {
   const rows = db.prepare("SELECT * FROM categories ORDER BY name ASC").all();
   res.json({ ok: true, categories: rows });
@@ -1615,37 +1807,18 @@ app.post("/categories", auth, (req, res) => {
   const schema = z.object({
     name: z.string().min(1)
   });
+
   const parsed = schema.safeParse(req.body);
   if (!parsed.success) return res.json({ ok: false, message: "Invalid category name" });
 
   try {
     db.prepare("INSERT INTO categories (name) VALUES (?)").run(parsed.data.name.trim());
     res.json({ ok: true });
-  } catch (e) {
+  } catch {
     res.json({ ok: false, message: "Category already exists" });
   }
 });
 
-// update product ecommerce fields
-app.put("/products/:id/ecommerce", auth, (req, res) => {
-  const id = Number(req.params.id);
-  const schema = z.object({
-    category_id: z.number().nullable().optional(),
-    image_url: z.string().optional().default("")
-  });
-  const parsed = schema.safeParse(req.body);
-  if (!parsed.success) return res.json({ ok: false, message: "Invalid ecommerce product data" });
-
-  db.prepare(`
-    UPDATE products
-    SET category_id=?, image_url=?
-    WHERE id=?
-  `).run(parsed.data.category_id || null, parsed.data.image_url || "", id);
-
-  res.json({ ok: true });
-});
-
-// public shop products with category
 app.get("/shop/products", (req, res) => {
   const rows = db.prepare(`
     SELECT 
@@ -1662,7 +1835,6 @@ app.get("/shop/products", (req, res) => {
   res.json({ ok: true, products: rows });
 });
 
-// public categories
 app.get("/shop/categories", (req, res) => {
   const rows = db.prepare(`
     SELECT c.id, c.name, COUNT(p.id) AS product_count
@@ -1675,7 +1847,6 @@ app.get("/shop/categories", (req, res) => {
   res.json({ ok: true, categories: rows });
 });
 
-// website orders
 app.post("/shop/orders", (req, res) => {
   const schema = z.object({
     customer_name: z.string().min(1),
@@ -1761,7 +1932,6 @@ app.post("/shop/orders", (req, res) => {
   }
 });
 
-// admin website orders
 app.get("/website/orders", auth, (req, res) => {
   const rows = db.prepare(`
     SELECT *
@@ -1774,116 +1944,8 @@ app.get("/website/orders", auth, (req, res) => {
 });
 
 // ==============================
-// PHASE A - CHANGE PASSWORD
+// START
 // ==============================
-app.post("/auth/change-password", auth, (req, res) => {
-  try {
-    const schema = z.object({
-      current_password: z.string().min(1),
-      new_password: z.string().min(4),
-      confirm_password: z.string().min(4),
-    });
-
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.json({ ok: false, message: "Invalid input" });
-
-    const { current_password, new_password, confirm_password } = parsed.data;
-    if (new_password !== confirm_password) {
-      return res.json({ ok: false, message: "New passwords do not match" });
-    }
-
-    const user = db.prepare("SELECT * FROM users WHERE username=?").get(req.user.username);
-    if (!user) return res.json({ ok: false, message: "User not found" });
-
-    const ok = bcrypt.compareSync(current_password, user.password_hash);
-    if (!ok) return res.json({ ok: false, message: "Current password is wrong" });
-
-    const newHash = bcrypt.hashSync(new_password, 10);
-    db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(newHash, user.id);
-
-    return res.json({ ok: true, message: "Password changed successfully" });
-  } catch (e) {
-    return res.json({ ok: false, message: String(e.message || e) });
-  }
-});
-
-// ==============================
-// PHASE B - CUSTOMER ACCOUNT / CREDIT
-// ==============================
-
-// Top up customer account
-app.post("/customers/:id/topup", auth, (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const schema = z.object({
-      amount: z.coerce.number().positive(),
-      note: z.string().optional().default("Account Top-up"),
-    });
-
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.json({ ok: false, message: "Invalid top-up data" });
-
-    const customer = db.prepare("SELECT * FROM customers WHERE id=?").get(id);
-    if (!customer) return res.json({ ok: false, message: "Customer not found" });
-
-    db.prepare(`
-      UPDATE customers
-      SET account_balance = account_balance + ?
-      WHERE id=?
-    `).run(parsed.data.amount, id);
-
-    return res.json({ ok: true, message: "Customer account topped up" });
-  } catch (e) {
-    return res.json({ ok: false, message: String(e.message || e) });
-  }
-});
-
-// Update customer credit settings
-app.put("/customers/:id/credit-settings", auth, (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const schema = z.object({
-      allow_credit: z.coerce.number().optional().default(0),
-      credit_limit: z.coerce.number().min(0).optional().default(0),
-    });
-
-    const parsed = schema.safeParse(req.body);
-    if (!parsed.success) return res.json({ ok: false, message: "Invalid credit settings" });
-
-    const customer = db.prepare("SELECT * FROM customers WHERE id=?").get(id);
-    if (!customer) return res.json({ ok: false, message: "Customer not found" });
-
-    db.prepare(`
-      UPDATE customers
-      SET allow_credit=?, credit_limit=?
-      WHERE id=?
-    `).run(parsed.data.allow_credit ? 1 : 0, parsed.data.credit_limit, id);
-
-    return res.json({ ok: true, message: "Credit settings updated" });
-  } catch (e) {
-    return res.json({ ok: false, message: String(e.message || e) });
-  }
-});
-
-// Customer account summary
-app.get("/customers/:id/account-summary", auth, (req, res) => {
-  try {
-    const id = Number(req.params.id);
-    const customer = db.prepare(`
-      SELECT id, name, phone, email, kra_pin, loyalty_points,
-             account_balance, credit_limit, credit_used, allow_credit
-      FROM customers
-      WHERE id=?
-    `).get(id);
-
-    if (!customer) return res.json({ ok: false, message: "Customer not found" });
-
-    return res.json({ ok: true, customer });
-  } catch (e) {
-    return res.json({ ok: false, message: String(e.message || e) });
-  }
-});
-
 const PORT = process.env.PORT || 8080;
 
 app.listen(PORT, () => {
