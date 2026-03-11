@@ -343,7 +343,84 @@ try { db.prepare("ALTER TABLE customers ADD COLUMN account_balance REAL NOT NULL
 try { db.prepare("ALTER TABLE customers ADD COLUMN credit_limit REAL NOT NULL DEFAULT 0").run(); } catch {}
 try { db.prepare("ALTER TABLE customers ADD COLUMN credit_used REAL NOT NULL DEFAULT 0").run(); } catch {}
 try { db.prepare("ALTER TABLE customers ADD COLUMN allow_credit INTEGER NOT NULL DEFAULT 0").run(); } catch {}
+// ==============================
+// ONE-TIME MIGRATION: pos_sales payment_mode CHECK upgrade
+// Allows Account and Credit on old databases
+// ==============================
+try {
+  const testInsert = db.transaction(() => {
+    db.exec(`
+      CREATE TABLE IF NOT EXISTS __pos_sales_check_test (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        receipt_no TEXT UNIQUE NOT NULL,
+        customer_id INTEGER,
+        total REAL NOT NULL DEFAULT 0 CHECK(total >= 0),
+        payment_mode TEXT NOT NULL CHECK(payment_mode IN ('Cash','Mpesa','Bank','Cheque','Account','Credit')),
+        payment_ref TEXT NOT NULL DEFAULT '',
+        amount_paid REAL NOT NULL DEFAULT 0 CHECK(amount_paid >= 0),
+        change_given REAL NOT NULL DEFAULT 0 CHECK(change_given >= 0),
+        created_at TEXT NOT NULL DEFAULT (datetime('now'))
+      );
+      DROP TABLE __pos_sales_check_test;
+    `);
+  });
+  testInsert();
+} catch {}
 
+try {
+  const cols = db.prepare(`PRAGMA table_info(pos_sales)`).all();
+  const hasPosSales = Array.isArray(cols) && cols.length > 0;
+
+  if (hasPosSales) {
+    const createRow = db.prepare(`
+      SELECT sql
+      FROM sqlite_master
+      WHERE type='table' AND name='pos_sales'
+    `).get();
+
+    const createSql = String(createRow?.sql || "");
+    const alreadyUpgraded =
+      createSql.includes("'Account'") && createSql.includes("'Credit'");
+
+    if (!alreadyUpgraded) {
+      db.exec(`
+        BEGIN TRANSACTION;
+
+        ALTER TABLE pos_sales RENAME TO pos_sales_old;
+
+        CREATE TABLE pos_sales (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          receipt_no TEXT UNIQUE NOT NULL,
+          customer_id INTEGER,
+          total REAL NOT NULL DEFAULT 0 CHECK(total >= 0),
+          payment_mode TEXT NOT NULL CHECK(payment_mode IN ('Cash','Mpesa','Bank','Cheque','Account','Credit')),
+          payment_ref TEXT NOT NULL DEFAULT '',
+          amount_paid REAL NOT NULL DEFAULT 0 CHECK(amount_paid >= 0),
+          change_given REAL NOT NULL DEFAULT 0 CHECK(change_given >= 0),
+          created_at TEXT NOT NULL DEFAULT (datetime('now')),
+          FOREIGN KEY (customer_id) REFERENCES customers(id)
+        );
+
+        INSERT INTO pos_sales (
+          id, receipt_no, customer_id, total, payment_mode,
+          payment_ref, amount_paid, change_given, created_at
+        )
+        SELECT
+          id, receipt_no, customer_id, total, payment_mode,
+          payment_ref, amount_paid, change_given, created_at
+        FROM pos_sales_old;
+
+        DROP TABLE pos_sales_old;
+
+        COMMIT;
+      `);
+
+      console.log("✅ pos_sales table migrated to support Account/Credit payment modes");
+    }
+  }
+} catch (e) {
+  console.log("pos_sales migration skipped or failed:", String(e.message || e));
+}
 // ==============================
 // SEED / ENSURE
 // ==============================

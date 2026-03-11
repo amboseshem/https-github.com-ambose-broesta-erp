@@ -16,16 +16,14 @@ async function api(path, { method = "GET", body } = {}) {
   });
 
   const text = await res.text();
-
-  // If server returned HTML (like 404 page), show it clearly
   const looksLikeHtml = text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html");
+
   if (looksLikeHtml) {
     return { ok: false, message: `Server returned HTML (wrong route / 404 / auth). Path: ${path}` };
   }
 
   try {
     const data = JSON.parse(text);
-    // if server gave non-200 but still JSON, keep message
     if (!res.ok && data && typeof data === "object") {
       return { ok: false, message: data.message || `HTTP ${res.status}`, ...data };
     }
@@ -35,11 +33,52 @@ async function api(path, { method = "GET", body } = {}) {
   }
 }
 
+async function apiAuthGet(path) {
+  const t = token();
+  const res = await fetch(API_BASE + path, {
+    method: "GET",
+    headers: {
+      Authorization: `Bearer ${t}`,
+      "Content-Type": "application/json",
+    },
+  });
+
+  const text = await res.text();
+  try {
+    return JSON.parse(text);
+  } catch {
+    return { ok: false, message: "Non-JSON response from server" };
+  }
+}
+
 const money = (n) =>
   Number(n || 0).toLocaleString("en-KE", {
     minimumFractionDigits: 2,
     maximumFractionDigits: 2,
   });
+
+function openPrintWindow(html) {
+  const w = window.open("", "_blank");
+  if (!w) return alert("Popup blocked. Allow popups then try again.");
+  w.document.open();
+  w.document.write(html);
+  w.document.close();
+}
+
+async function makeQrDataUrl(text) {
+  return await QRCode.toDataURL(text, { margin: 1, width: 160 });
+}
+
+function lineVat(item) {
+  const subtotal = Number(item.subtotal || 0);
+  const taxType = item.tax_type || "EXEMPT";
+  const taxRate = Number(item.tax_rate || 0);
+
+  if (taxType === "EXEMPT" || taxRate <= 0) return 0;
+  if (taxType === "INCLUSIVE") return subtotal - subtotal / (1 + taxRate / 100);
+  if (taxType === "EXCLUSIVE") return subtotal * (taxRate / 100);
+  return 0;
+}
 
 export default function Sales() {
   const nav = useNavigate();
@@ -50,7 +89,7 @@ export default function Sales() {
   const [quotes, setQuotes] = useState([]);
   const [orders, setOrders] = useState([]);
 
-  const [tab, setTab] = useState("quotes"); // quotes | orders
+  const [tab, setTab] = useState("quotes");
   const [selectedQuoteNo, setSelectedQuoteNo] = useState("");
   const [quote, setQuote] = useState(null);
   const [quoteItems, setQuoteItems] = useState([]);
@@ -62,7 +101,6 @@ export default function Sales() {
   const [newQuoteCustomer, setNewQuoteCustomer] = useState("");
   const [addItem, setAddItem] = useState({ product_id: "", qty: "", price: "" });
 
-  // ✅ for reprint buttons
   const [lastDn, setLastDn] = useState("");
   const [lastInv, setLastInv] = useState("");
 
@@ -112,9 +150,11 @@ export default function Sales() {
 
   async function addQuoteItem() {
     if (!selectedQuoteNo) return alert("Open a quotation first");
+
     const pid = Number(addItem.product_id);
     const qty = Number(addItem.qty);
     const price = Number(addItem.price);
+
     if (!pid) return alert("Select product");
     if (!Number.isFinite(qty) || qty <= 0) return alert("Qty invalid");
     if (!Number.isFinite(price) || price < 0) return alert("Price invalid");
@@ -123,7 +163,9 @@ export default function Sales() {
       method: "POST",
       body: { product_id: pid, qty, price },
     });
+
     if (!res.ok) return alert(res.message);
+
     await openQuote(selectedQuoteNo);
     setAddItem({ product_id: "", qty: "", price: "" });
   }
@@ -143,8 +185,7 @@ export default function Sales() {
     if (!res.ok) return alert(res.message);
     await loadAll();
     alert("Delivered ✅ DN: " + res.dn_no);
-    setLastDn(res.dn_no); // ✅ for Print DN
-    // refresh order
+    setLastDn(res.dn_no);
     openOrder(selectedSoNo);
   }
 
@@ -153,31 +194,17 @@ export default function Sales() {
     const res = await api(`/sales/orders/${encodeURIComponent(selectedSoNo)}/invoice`, { method: "POST" });
     if (!res.ok) return alert(res.message);
     alert(`Invoice posted ✅ ${res.inv_no}  Total: KSh ${money(res.total)}  (DN: ${res.dn_no})`);
-    setLastInv(res.inv_no); // ✅ for Print Invoice
+    setLastInv(res.inv_no);
     await loadAll();
     openOrder(selectedSoNo);
   }
 
-  // =========================
-  // PRINT HELPERS (DN + INVOICE)
-  // =========================
-  function openPrintWindow(html) {
-    const w = window.open("", "_blank");
-    w.document.open();
-    w.document.write(html);
-    w.document.close();
-  }
-
-  async function makeQrDataUrl(text) {
-    return await QRCode.toDataURL(text, { margin: 1, width: 160 });
-  }
-
   function companyBlock(company) {
     if (!company) return "";
-    // if logo is saved as base64 in DB, it should already be a data:image/... string
-    const logo = company.logo_data
-      ? `<img src="${company.logo_data}" style="height:54px;object-fit:contain" />`
+    const logo = company.logo_url
+      ? `<img src="${company.logo_url}" style="height:54px;object-fit:contain" />`
       : "";
+
     return `
       <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:16px">
         <div style="display:flex;gap:12px;align-items:center">
@@ -190,7 +217,6 @@ export default function Sales() {
           </div>
         </div>
         <div style="text-align:right;font-size:12px;opacity:.85">
-          ${company.website ? `<div>${company.website}</div>` : ""}
           ${company.email ? `<div>${company.email}</div>` : ""}
         </div>
       </div>
@@ -203,24 +229,21 @@ export default function Sales() {
     if (!data.ok) return alert(data.message);
 
     const { dn, items, company } = data;
-
     const qr = await makeQrDataUrl(`DN:${dn.dn_no}|SO:${dn.so_no}|DATE:${dn.created_at}`);
 
     const rows = (items || [])
-      .map(
-        (it, idx) => `
-      <tr>
-        <td style="padding:8px;border-bottom:1px solid #eee">${idx + 1}</td>
-        <td style="padding:8px;border-bottom:1px solid #eee">
-          <div style="font-weight:800">${it.product_name}</div>
-          <div style="font-size:11px;opacity:.75">
-  Ref: ${it.reference || "-"} • Barcode: ${it.barcode || "-"} • Tax: ${it.tax_type || "EXEMPT"}${Number(it.tax_rate || 0) > 0 ? " (" + it.tax_rate + "%)" : ""}
-</div>
-        </td>
-        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${it.qty}</td>
-      </tr>
-    `
-      )
+      .map((it, idx) => `
+        <tr>
+          <td style="padding:8px;border-bottom:1px solid #eee">${idx + 1}</td>
+          <td style="padding:8px;border-bottom:1px solid #eee">
+            <div style="font-weight:800">${it.product_name}</div>
+            <div style="font-size:11px;opacity:.75">
+              Ref: ${it.reference || "-"} • Barcode: ${it.barcode || "-"}
+            </div>
+          </td>
+          <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${it.qty}</td>
+        </tr>
+      `)
       .join("");
 
     const html = `
@@ -286,44 +309,38 @@ export default function Sales() {
 
     openPrintWindow(html);
   }
-async function apiAuthGet(path) {
-  const t = token();
-  const res = await fetch(API_BASE + path, {
-    method: "GET",
-    headers: {
-      Authorization: `Bearer ${t}`,
-      "Content-Type": "application/json",
-    },
-  });
-  const text = await res.text();
-  try { return JSON.parse(text); }
-  catch { return { ok:false, message:"Non-JSON response from server" }; }
-}
+
   async function printInvoice(invNo) {
     if (!invNo) return alert("No Invoice number");
     const data = await apiAuthGet(`/sales/invoices/${encodeURIComponent(invNo)}`);
     if (!data.ok) return alert(data.message);
 
     const { inv, so, items, company } = data;
-
     const qr = await makeQrDataUrl(`INV:${inv.inv_no}|DN:${inv.dn_no}|TOTAL:${inv.total}`);
 
     const rows = (items || [])
-      .map(
-        (it, idx) => `
-      <tr>
-        <td style="padding:8px;border-bottom:1px solid #eee">${idx + 1}</td>
-        <td style="padding:8px;border-bottom:1px solid #eee">
-          <div style="font-weight:800">${it.product_name}</div>
-          <div style="font-size:11px;opacity:.75">Ref: ${it.reference || "-"} • Barcode: ${it.barcode || "-"}</div>
-        </td>
-        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${it.qty}</td>
-        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${money(it.price)}</td>
-        <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${money(it.subtotal)}</td>
-      </tr>
-    `
-      )
+      .map((it, idx) => {
+        const vat = lineVat(it);
+        return `
+          <tr>
+            <td style="padding:8px;border-bottom:1px solid #eee">${idx + 1}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee">
+              <div style="font-weight:800">${it.product_name}</div>
+              <div style="font-size:11px;opacity:.75">
+                Ref: ${it.reference || "-"} • Barcode: ${it.barcode || "-"} • Tax: ${it.tax_type || "EXEMPT"}${Number(it.tax_rate || 0) > 0 ? ` (${it.tax_rate}%)` : ""}
+              </div>
+            </td>
+            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${it.qty}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${money(it.price)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${money(vat)}</td>
+            <td style="padding:8px;border-bottom:1px solid #eee;text-align:right">${money(it.subtotal)}</td>
+          </tr>
+        `;
+      })
       .join("");
+
+    const totalVat = (items || []).reduce((s, it) => s + lineVat(it), 0);
+    const subtotal = Number(inv.total || 0) - totalVat;
 
     const html = `
     <html><head><title>${inv.inv_no}</title>
@@ -339,7 +356,7 @@ async function apiAuthGet(path) {
         table{width:100%;border-collapse:collapse;margin-top:12px}
         th{background:#0b5bd3;color:#fff;text-align:left;padding:10px;font-size:12px}
         .totals{margin-top:12px;display:flex;justify-content:flex-end}
-        .totals .card{width:320px;border:1px solid #e6e6e6;border-radius:12px;overflow:hidden}
+        .totals .card{width:340px;border:1px solid #e6e6e6;border-radius:12px;overflow:hidden}
         .totals .row{display:flex;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eee;font-size:13px}
         .totals .row:last-child{border-bottom:none;background:#0b5bd3;color:#fff;font-weight:900}
         .mini{font-size:11px;opacity:.78}
@@ -377,8 +394,9 @@ async function apiAuthGet(path) {
               <tr>
                 <th style="width:50px">#</th>
                 <th>DESCRIPTION</th>
-                <th style="width:100px;text-align:right">QTY</th>
-                <th style="width:130px;text-align:right">UNIT PRICE</th>
+                <th style="width:90px;text-align:right">QTY</th>
+                <th style="width:120px;text-align:right">UNIT PRICE</th>
+                <th style="width:110px;text-align:right">VAT</th>
                 <th style="width:140px;text-align:right">AMOUNT</th>
               </tr>
             </thead>
@@ -387,8 +405,8 @@ async function apiAuthGet(path) {
 
           <div class="totals">
             <div class="card">
-              <div class="row"><span>Subtotal</span><span>KSh ${money(inv.total)}</span></div>
-              <div class="row"><span>VAT</span><span>KSh 0.00</span></div>
+              <div class="row"><span>Subtotal</span><span>KSh ${money(subtotal)}</span></div>
+              <div class="row"><span>VAT</span><span>KSh ${money(totalVat)}</span></div>
               <div class="row"><span>Total</span><span>KSh ${money(inv.total)}</span></div>
             </div>
           </div>
@@ -401,7 +419,6 @@ async function apiAuthGet(path) {
     openPrintWindow(html);
   }
 
-  // totals
   const quoteTotal = useMemo(() => quoteItems.reduce((s, i) => s + Number(i.subtotal || 0), 0), [quoteItems]);
   const orderTotal = useMemo(() => orderItems.reduce((s, i) => s + Number(i.subtotal || 0), 0), [orderItems]);
 
@@ -420,25 +437,16 @@ async function apiAuthGet(path) {
       >
         <div style={{ fontWeight: 900 }}>Broesta ERP • Sales</div>
         <div style={{ display: "flex", gap: 10 }}>
-          <button className="btn" onClick={() => nav("/apps")}>
-            Back
-          </button>
-          <button className="btn" onClick={() => nav("/inventory")}>
-            Inventory
-          </button>
+          <button className="btn" onClick={() => nav("/apps")}>Back</button>
+          <button className="btn" onClick={() => nav("/inventory")}>Inventory</button>
         </div>
       </div>
 
       <div style={{ padding: 16, display: "grid", gridTemplateColumns: "1.1fr 1.4fr", gap: 14 }}>
-        {/* LEFT LISTS */}
         <div style={{ background: "#fff", borderRadius: 16, padding: 14, boxShadow: "0 10px 25px rgba(0,0,0,0.06)" }}>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
-            <button className="btn" onClick={() => setTab("quotes")}>
-              Quotations
-            </button>
-            <button className="btn" onClick={() => setTab("orders")}>
-              Sales Orders
-            </button>
+            <button className="btn" onClick={() => setTab("quotes")}>Quotations</button>
+            <button className="btn" onClick={() => setTab("orders")}>Sales Orders</button>
           </div>
 
           {tab === "quotes" && (
@@ -447,30 +455,20 @@ async function apiAuthGet(path) {
                 <select className="inp" value={newQuoteCustomer} onChange={(e) => setNewQuoteCustomer(e.target.value)} style={{ flex: 1 }}>
                   <option value="">(Optional) choose customer</option>
                   {customers.map((c) => (
-                    <option key={c.id} value={c.id}>
-                      {c.name}
-                    </option>
+                    <option key={c.id} value={c.id}>{c.name}</option>
                   ))}
                 </select>
-                <button className="btn primary" onClick={createQuote}>
-                  New
-                </button>
+                <button className="btn primary" onClick={createQuote}>New</button>
               </div>
 
               <div style={{ marginTop: 12, maxHeight: 520, overflow: "auto", border: "1px solid #eee", borderRadius: 14, padding: 10 }}>
                 {quotes.map((q) => (
                   <div key={q.quote_no} style={{ padding: "10px 0", borderBottom: "1px dashed #eee", display: "flex", justifyContent: "space-between", gap: 10 }}>
                     <div>
-                      <div style={{ fontWeight: 900 }}>
-                        {q.quote_no} • {q.status}
-                      </div>
-                      <div style={{ fontSize: 12, opacity: 0.8 }}>
-                        {q.customer_name || "No customer"} • {q.created_at}
-                      </div>
+                      <div style={{ fontWeight: 900 }}>{q.quote_no} • {q.status}</div>
+                      <div style={{ fontSize: 12, opacity: 0.8 }}>{q.customer_name || "No customer"} • {q.created_at}</div>
                     </div>
-                    <button className="btn" onClick={() => openQuote(q.quote_no)}>
-                      Open
-                    </button>
+                    <button className="btn" onClick={() => openQuote(q.quote_no)}>Open</button>
                   </div>
                 ))}
                 {quotes.length === 0 && <div style={{ opacity: 0.75 }}>No quotations yet</div>}
@@ -483,16 +481,10 @@ async function apiAuthGet(path) {
               {orders.map((o) => (
                 <div key={o.so_no} style={{ padding: "10px 0", borderBottom: "1px dashed #eee", display: "flex", justifyContent: "space-between", gap: 10 }}>
                   <div>
-                    <div style={{ fontWeight: 900 }}>
-                      {o.so_no} • {o.status}
-                    </div>
-                    <div style={{ fontSize: 12, opacity: 0.8 }}>
-                      {o.customer_name || "No customer"} • {o.created_at}
-                    </div>
+                    <div style={{ fontWeight: 900 }}>{o.so_no} • {o.status}</div>
+                    <div style={{ fontSize: 12, opacity: 0.8 }}>{o.customer_name || "No customer"} • {o.created_at}</div>
                   </div>
-                  <button className="btn" onClick={() => openOrder(o.so_no)}>
-                    Open
-                  </button>
+                  <button className="btn" onClick={() => openOrder(o.so_no)}>Open</button>
                 </div>
               ))}
               {orders.length === 0 && <div style={{ opacity: 0.75 }}>No sales orders yet</div>}
@@ -500,15 +492,12 @@ async function apiAuthGet(path) {
           )}
         </div>
 
-        {/* RIGHT DETAIL */}
         <div style={{ background: "#fff", borderRadius: 16, padding: 14, boxShadow: "0 10px 25px rgba(0,0,0,0.06)" }}>
           {tab === "quotes" && quote && (
             <>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                 <div>
-                  <div style={{ fontWeight: 900, fontSize: 16 }}>
-                    {quote.quote_no} • {quote.status}
-                  </div>
+                  <div style={{ fontWeight: 900, fontSize: 16 }}>{quote.quote_no} • {quote.status}</div>
                   <div style={{ fontSize: 12, opacity: 0.8 }}>{quote.customer_name || "No customer selected"}</div>
                 </div>
                 <button className="btn primary" onClick={confirmQuote} disabled={quote.status !== "DRAFT"}>
@@ -521,16 +510,12 @@ async function apiAuthGet(path) {
                 <select className="inp" value={addItem.product_id} onChange={(e) => setAddItem({ ...addItem, product_id: e.target.value })}>
                   <option value="">Select product</option>
                   {products.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name}
-                    </option>
+                    <option key={p.id} value={p.id}>{p.name}</option>
                   ))}
                 </select>
                 <input className="inp" placeholder="Qty" value={addItem.qty} onChange={(e) => setAddItem({ ...addItem, qty: e.target.value })} />
                 <input className="inp" placeholder="Price" value={addItem.price} onChange={(e) => setAddItem({ ...addItem, price: e.target.value })} />
-                <button className="btn" onClick={addQuoteItem}>
-                  Add
-                </button>
+                <button className="btn" onClick={addQuoteItem}>Add</button>
               </div>
 
               <div style={{ marginTop: 12, border: "1px solid #eee", borderRadius: 14, padding: 10, maxHeight: 420, overflow: "auto" }}>
@@ -556,13 +541,10 @@ async function apiAuthGet(path) {
             <>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
                 <div>
-                  <div style={{ fontWeight: 900, fontSize: 16 }}>
-                    {order.so_no} • {order.status}
-                  </div>
+                  <div style={{ fontWeight: 900, fontSize: 16 }}>{order.so_no} • {order.status}</div>
                   <div style={{ fontSize: 12, opacity: 0.8 }}>{order.customer_name || "No customer"}</div>
                 </div>
 
-                {/* ✅ Buttons (Deliver/Invoice + Print/Reprint) */}
                 <div style={{ display: "flex", gap: 10, flexWrap: "wrap", justifyContent: "flex-end" }}>
                   <button className="btn" onClick={deliverOrder} disabled={order.status !== "CONFIRMED"}>
                     Deliver (DN)
@@ -570,8 +552,6 @@ async function apiAuthGet(path) {
                   <button className="btn primary" onClick={invoiceOrder} disabled={order.status !== "DELIVERED"}>
                     Invoice
                   </button>
-
-                  {/* Step E: Print buttons */}
                   <button className="btn" onClick={() => printDN(lastDn)} disabled={!lastDn}>
                     Print DN
                   </button>
