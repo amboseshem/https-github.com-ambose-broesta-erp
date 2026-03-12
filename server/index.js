@@ -345,33 +345,15 @@ try { db.prepare("ALTER TABLE customers ADD COLUMN credit_used REAL NOT NULL DEF
 try { db.prepare("ALTER TABLE customers ADD COLUMN allow_credit INTEGER NOT NULL DEFAULT 0").run(); } catch {}
 // ==============================
 // ONE-TIME MIGRATION: pos_sales payment_mode CHECK upgrade
-// Allows Account and Credit on old databases
+// Safe version
 // ==============================
 try {
-  const testInsert = db.transaction(() => {
-    db.exec(`
-      CREATE TABLE IF NOT EXISTS __pos_sales_check_test (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        receipt_no TEXT UNIQUE NOT NULL,
-        customer_id INTEGER,
-        total REAL NOT NULL DEFAULT 0 CHECK(total >= 0),
-        payment_mode TEXT NOT NULL CHECK(payment_mode IN ('Cash','Mpesa','Bank','Cheque','Account','Credit')),
-        payment_ref TEXT NOT NULL DEFAULT '',
-        amount_paid REAL NOT NULL DEFAULT 0 CHECK(amount_paid >= 0),
-        change_given REAL NOT NULL DEFAULT 0 CHECK(change_given >= 0),
-        created_at TEXT NOT NULL DEFAULT (datetime('now'))
-      );
-      DROP TABLE __pos_sales_check_test;
-    `);
-  });
-  testInsert();
-} catch {}
+  const tableRow = db.prepare(`
+    SELECT name FROM sqlite_master
+    WHERE type='table' AND name='pos_sales'
+  `).get();
 
-try {
-  const cols = db.prepare(`PRAGMA table_info(pos_sales)`).all();
-  const hasPosSales = Array.isArray(cols) && cols.length > 0;
-
-  if (hasPosSales) {
+  if (tableRow) {
     const createRow = db.prepare(`
       SELECT sql
       FROM sqlite_master
@@ -383,12 +365,17 @@ try {
       createSql.includes("'Account'") && createSql.includes("'Credit'");
 
     if (!alreadyUpgraded) {
+      const oldExists = db.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name='pos_sales_old'
+      `).get();
+
+      if (!oldExists) {
+        db.exec(`ALTER TABLE pos_sales RENAME TO pos_sales_old;`);
+      }
+
       db.exec(`
-        BEGIN TRANSACTION;
-
-        ALTER TABLE pos_sales RENAME TO pos_sales_old;
-
-        CREATE TABLE pos_sales (
+        CREATE TABLE IF NOT EXISTS pos_sales (
           id INTEGER PRIMARY KEY AUTOINCREMENT,
           receipt_no TEXT UNIQUE NOT NULL,
           customer_id INTEGER,
@@ -400,22 +387,37 @@ try {
           created_at TEXT NOT NULL DEFAULT (datetime('now')),
           FOREIGN KEY (customer_id) REFERENCES customers(id)
         );
-
-        INSERT INTO pos_sales (
-          id, receipt_no, customer_id, total, payment_mode,
-          payment_ref, amount_paid, change_given, created_at
-        )
-        SELECT
-          id, receipt_no, customer_id, total, payment_mode,
-          payment_ref, amount_paid, change_given, created_at
-        FROM pos_sales_old;
-
-        DROP TABLE pos_sales_old;
-
-        COMMIT;
       `);
 
-      console.log("✅ pos_sales table migrated to support Account/Credit payment modes");
+      const newHasRows = db.prepare(`SELECT COUNT(*) AS c FROM pos_sales`).get();
+      const oldStillExists = db.prepare(`
+        SELECT name FROM sqlite_master
+        WHERE type='table' AND name='pos_sales_old'
+      `).get();
+
+      if (oldStillExists && Number(newHasRows?.c || 0) === 0) {
+        db.exec(`
+          INSERT INTO pos_sales (
+            id, receipt_no, customer_id, total, payment_mode,
+            payment_ref, amount_paid, change_given, created_at
+          )
+          SELECT
+            id, receipt_no, customer_id, total, payment_mode,
+            payment_ref, amount_paid, change_given, created_at
+          FROM pos_sales_old;
+        `);
+      }
+
+      const oldRows = oldStillExists
+        ? db.prepare(`SELECT COUNT(*) AS c FROM pos_sales_old`).get()
+        : { c: 0 };
+      const newRows = db.prepare(`SELECT COUNT(*) AS c FROM pos_sales`).get();
+
+      if (!oldStillExists || Number(newRows?.c || 0) >= Number(oldRows?.c || 0)) {
+        db.exec(`DROP TABLE IF EXISTS pos_sales_old;`);
+      }
+
+      console.log("✅ pos_sales table migration checked");
     }
   }
 } catch (e) {
