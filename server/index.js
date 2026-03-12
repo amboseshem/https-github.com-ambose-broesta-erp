@@ -343,6 +343,9 @@ try { db.prepare("ALTER TABLE customers ADD COLUMN account_balance REAL NOT NULL
 try { db.prepare("ALTER TABLE customers ADD COLUMN credit_limit REAL NOT NULL DEFAULT 0").run(); } catch {}
 try { db.prepare("ALTER TABLE customers ADD COLUMN credit_used REAL NOT NULL DEFAULT 0").run(); } catch {}
 try { db.prepare("ALTER TABLE customers ADD COLUMN allow_credit INTEGER NOT NULL DEFAULT 0").run(); } catch {}
+try { db.prepare("ALTER TABLE users ADD COLUMN full_name TEXT NOT NULL DEFAULT ''").run(); } catch {}
+try { db.prepare("ALTER TABLE users ADD COLUMN allowed_apps TEXT NOT NULL DEFAULT 'pos'").run(); } catch {}
+try { db.prepare("ALTER TABLE pos_sales ADD COLUMN served_by TEXT NOT NULL DEFAULT ''").run(); } catch {}
 // ==============================
 // ONE-TIME MIGRATION: pos_sales payment_mode CHECK upgrade
 // Safe version
@@ -441,8 +444,16 @@ function ensureCounter(key) {
 const adminRow = db.prepare("SELECT id FROM users WHERE username='admin'").get();
 if (!adminRow) {
   const hash = bcrypt.hashSync("1234", 10);
-  db.prepare("INSERT INTO users (username,password_hash,role) VALUES (?,?,?)")
-    .run("admin", hash, "admin");
+  db.prepare(`
+    INSERT INTO users (username,password_hash,role,full_name,allowed_apps)
+    VALUES (?,?,?,?,?)
+  `).run(
+    "admin",
+    hash,
+    "admin",
+    "Administrator",
+    "all"
+  );
 }
 
 function ensureJournal(code, name) {
@@ -478,13 +489,56 @@ function auth(req, res, next) {
   if (!tok) return res.status(401).json({ ok: false, message: "Missing token" });
 
   try {
-    req.user = jwt.verify(tok, JWT_SECRET);
+    const decoded = jwt.verify(tok, JWT_SECRET);
+    const user = db.prepare(`
+      SELECT id, username, role, full_name, allowed_apps
+      FROM users
+      WHERE id=?
+    `).get(decoded.id);
+
+    if (!user) return res.status(401).json({ ok: false, message: "User not found" });
+
+    req.user = user;
     next();
   } catch {
     return res.status(401).json({ ok: false, message: "Invalid token" });
   }
 }
+function normalizeAppsInput(v) {
+  if (Array.isArray(v)) {
+    return v.map(x => String(x || "").trim().toLowerCase()).filter(Boolean).join(",");
+  }
+  return String(v || "")
+    .split(",")
+    .map(x => x.trim().toLowerCase())
+    .filter(Boolean)
+    .join(",");
+}
 
+function userAppsList(user) {
+  const raw = String(user?.allowed_apps || "");
+  if (raw === "all") return ["all"];
+  return raw.split(",").map(x => x.trim().toLowerCase()).filter(Boolean);
+}
+
+function requireAdmin(req, res, next) {
+  if (!req.user || req.user.role !== "admin") {
+    return res.status(403).json({ ok: false, message: "Admin only" });
+  }
+  next();
+}
+
+function requireAppAccess(appName) {
+  return (req, res, next) => {
+    if (!req.user) return res.status(401).json({ ok: false, message: "Unauthorized" });
+    if (req.user.role === "admin") return next();
+
+    const apps = userAppsList(req.user);
+    if (apps.includes("all") || apps.includes(String(appName || "").toLowerCase())) return next();
+
+    return res.status(403).json({ ok: false, message: `Access denied for ${appName}` });
+  };
+}
 // ==============================
 // ROOT + HEALTH
 // ==============================
@@ -503,21 +557,38 @@ app.post("/auth/login", (req, res) => {
   try {
     const { username, password } = req.body || {};
 
-    const user = db.prepare("SELECT * FROM users WHERE username=?").get(String(username || "").trim());
+    const user = db.prepare(`
+      SELECT *
+      FROM users
+      WHERE username=?
+    `).get(String(username || "").trim());
+
     if (!user) return res.json({ ok: false, message: "Wrong username" });
 
     const ok = bcrypt.compareSync(String(password || ""), user.password_hash);
     if (!ok) return res.json({ ok: false, message: "Wrong password" });
 
-    const token = jwt.sign(
-      { username: user.username, role: user.role },
-      JWT_SECRET,
-      { expiresIn: "30d" }
-    );
+    const jwtPayload = {
+      id: user.id,
+      username: user.username,
+      role: user.role,
+    };
 
-    return res.json({ ok: true, token });
-  } catch {
-    return res.json({ ok: false, message: "Login failed" });
+    const authToken = jwt.sign(jwtPayload, JWT_SECRET, { expiresIn: "30d" });
+
+    return res.json({
+      ok: true,
+      token: authToken,
+      user: {
+        id: user.id,
+        username: user.username,
+        full_name: user.full_name || user.username,
+        role: user.role,
+        allowed_apps: user.allowed_apps || "pos",
+      },
+    });
+  } catch (e) {
+    return res.json({ ok: false, message: String(e.message || e) });
   }
 });
 
@@ -551,7 +622,115 @@ app.post("/auth/change-password", auth, (req, res) => {
     return res.json({ ok: false, message: String(e.message || e) });
   }
 });
+app.get("/auth/me", auth, (req, res) => {
+  res.json({ ok: true, user: req.user });
+});
+// ==============================
+// USERS / SECURITY
+// ==============================
+app.get("/users", auth, requireAdmin, (req, res) => {
+  const rows = db.prepare(`
+    SELECT id, username, role, full_name, allowed_apps, created_at
+    FROM users
+    ORDER BY id DESC
+  `).all();
 
+  res.json({ ok: true, users: rows });
+});
+
+app.post("/users", auth, requireAdmin, (req, res) => {
+  try {
+    const schema = z.object({
+      username: z.string().min(3),
+      password: z.string().min(4),
+      full_name: z.string().min(1),
+      role: z.enum(["admin", "manager", "cashier"]),
+      allowed_apps: z.union([z.string(), z.array(z.string())]).optional().default("pos"),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid user input" });
+
+    const p = parsed.data;
+    const exists = db.prepare("SELECT id FROM users WHERE username=?").get(p.username.trim());
+    if (exists) return res.json({ ok: false, message: "Username already exists" });
+
+    const hash = bcrypt.hashSync(p.password, 10);
+    const allowedApps = p.role === "admin" ? "all" : normalizeAppsInput(p.allowed_apps || "pos");
+
+    db.prepare(`
+      INSERT INTO users (username, password_hash, role, full_name, allowed_apps)
+      VALUES (?,?,?,?,?)
+    `).run(
+      p.username.trim(),
+      hash,
+      p.role,
+      p.full_name.trim(),
+      allowedApps || "pos"
+    );
+
+    res.json({ ok: true, message: "User created" });
+  } catch (e) {
+    res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+app.put("/users/:id", auth, requireAdmin, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+
+    const schema = z.object({
+      full_name: z.string().min(1),
+      role: z.enum(["admin", "manager", "cashier"]),
+      allowed_apps: z.union([z.string(), z.array(z.string())]).optional().default("pos"),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid update input" });
+
+    const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+    if (!user) return res.json({ ok: false, message: "User not found" });
+
+    const allowedApps = parsed.data.role === "admin" ? "all" : normalizeAppsInput(parsed.data.allowed_apps || "pos");
+
+    db.prepare(`
+      UPDATE users
+      SET full_name=?, role=?, allowed_apps=?
+      WHERE id=?
+    `).run(
+      parsed.data.full_name.trim(),
+      parsed.data.role,
+      allowedApps || "pos",
+      id
+    );
+
+    res.json({ ok: true, message: "User updated" });
+  } catch (e) {
+    res.json({ ok: false, message: String(e.message || e) });
+  }
+});
+
+app.post("/users/:id/reset-password", auth, requireAdmin, (req, res) => {
+  try {
+    const id = Number(req.params.id);
+    const schema = z.object({
+      new_password: z.string().min(4),
+    });
+
+    const parsed = schema.safeParse(req.body);
+    if (!parsed.success) return res.json({ ok: false, message: "Invalid password input" });
+
+    const user = db.prepare("SELECT * FROM users WHERE id=?").get(id);
+    if (!user) return res.json({ ok: false, message: "User not found" });
+
+    const hash = bcrypt.hashSync(parsed.data.new_password, 10);
+    db.prepare("UPDATE users SET password_hash=? WHERE id=?").run(hash, id);
+
+    res.json({ ok: true, message: "Password reset successfully" });
+  } catch (e) {
+    res.json({ ok: false, message: String(e.message || e) });
+  }
+});
 // ==============================
 // COMPANY
 // ==============================

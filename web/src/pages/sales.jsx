@@ -17,7 +17,6 @@ async function api(path, { method = "GET", body } = {}) {
 
   const text = await res.text();
   const looksLikeHtml = text.trim().startsWith("<!DOCTYPE") || text.trim().startsWith("<html");
-
   if (looksLikeHtml) {
     return { ok: false, message: `Server returned HTML (wrong route / 404 / auth). Path: ${path}` };
   }
@@ -249,17 +248,16 @@ export default function Sales() {
     const html = `
     <html><head><title>${dn.dn_no}</title>
       <style>
-        body{font-family:Arial;margin:0;background:#f2f4f8}
-        .page{max-width:900px;margin:18px auto;background:#fff;border-radius:14px;box-shadow:0 12px 30px rgba(0,0,0,.12);overflow:hidden}
-        .bar{background:linear-gradient(90deg,#0b5bd3,#2aa9ff);color:#fff;padding:14px 18px;display:flex;justify-content:space-between;align-items:center}
-        .bar h1{margin:0;font-size:18px;letter-spacing:.3px}
+        body{font-family:Arial;margin:0;background:#eef2ff}
+        .page{max-width:920px;margin:18px auto;background:#fff;border-radius:18px;box-shadow:0 12px 30px rgba(0,0,0,.12);overflow:hidden}
+        .bar{background:linear-gradient(90deg,#2563eb,#06b6d4,#ec4899);color:#fff;padding:14px 18px;display:flex;justify-content:space-between;align-items:center}
+        .bar h1{margin:0;font-size:18px}
         .pad{padding:16px 18px}
         table{width:100%;border-collapse:collapse}
-        th{background:#0b5bd3;color:#fff;text-align:left;padding:10px;font-size:12px}
+        th{background:#2563eb;color:#fff;text-align:left;padding:10px;font-size:12px}
         .box{border:1px solid #e6e6e6;border-radius:12px;padding:12px}
         .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
         .muted{font-size:12px;opacity:.82}
-        .mini{font-size:11px;opacity:.78}
       </style>
     </head><body>
       <div class="page">
@@ -283,7 +281,7 @@ export default function Sales() {
             <div class="box" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
               <div>
                 <div style="font-weight:900">Tracking QR</div>
-                <div class="mini">Scan to verify DN details</div>
+                <div class="muted">Scan to verify DN details</div>
               </div>
               <img src="${qr}" style="width:130px;height:130px" />
             </div>
@@ -345,21 +343,20 @@ export default function Sales() {
     const html = `
     <html><head><title>${inv.inv_no}</title>
       <style>
-        body{font-family:Arial;margin:0;background:#f2f4f8}
-        .page{max-width:980px;margin:18px auto;background:#fff;border-radius:14px;box-shadow:0 12px 30px rgba(0,0,0,.12);overflow:hidden}
-        .bar{background:linear-gradient(90deg,#0b5bd3,#2aa9ff);color:#fff;padding:14px 18px;display:flex;justify-content:space-between;align-items:center}
-        .bar h1{margin:0;font-size:18px;letter-spacing:.3px}
+        body{font-family:Arial;margin:0;background:#eff6ff}
+        .page{max-width:980px;margin:18px auto;background:#fff;border-radius:18px;box-shadow:0 12px 30px rgba(0,0,0,.12);overflow:hidden}
+        .bar{background:linear-gradient(90deg,#2563eb,#06b6d4,#ec4899);color:#fff;padding:14px 18px;display:flex;justify-content:space-between;align-items:center}
+        .bar h1{margin:0;font-size:18px}
         .pad{padding:16px 18px}
         .grid{display:grid;grid-template-columns:1fr 1fr;gap:12px}
         .box{border:1px solid #e6e6e6;border-radius:12px;padding:12px}
         .muted{font-size:12px;opacity:.82}
         table{width:100%;border-collapse:collapse;margin-top:12px}
-        th{background:#0b5bd3;color:#fff;text-align:left;padding:10px;font-size:12px}
+        th{background:#2563eb;color:#fff;text-align:left;padding:10px;font-size:12px}
         .totals{margin-top:12px;display:flex;justify-content:flex-end}
         .totals .card{width:340px;border:1px solid #e6e6e6;border-radius:12px;overflow:hidden}
         .totals .row{display:flex;justify-content:space-between;padding:10px 12px;border-bottom:1px solid #eee;font-size:13px}
-        .totals .row:last-child{border-bottom:none;background:#0b5bd3;color:#fff;font-weight:900}
-        .mini{font-size:11px;opacity:.78}
+        .totals .row:last-child{border-bottom:none;background:#2563eb;color:#fff;font-weight:900}
       </style>
     </head><body>
       <div class="page">
@@ -383,7 +380,7 @@ export default function Sales() {
             <div class="box" style="display:flex;justify-content:space-between;align-items:center;gap:12px">
               <div>
                 <div style="font-weight:900">Invoice QR</div>
-                <div class="mini">Scan to verify invoice details</div>
+                <div class="muted">Scan to verify invoice details</div>
               </div>
               <img src="${qr}" style="width:130px;height:130px" />
             </div>
@@ -419,15 +416,18 @@ export default function Sales() {
     openPrintWindow(html);
   }
 
+  const quoteVat = useMemo(() => quoteItems.reduce((s, i) => s + lineVat(i), 0), [quoteItems]);
   const quoteTotal = useMemo(() => quoteItems.reduce((s, i) => s + Number(i.subtotal || 0), 0), [quoteItems]);
+
+  const orderVat = useMemo(() => orderItems.reduce((s, i) => s + lineVat(i), 0), [orderItems]);
   const orderTotal = useMemo(() => orderItems.reduce((s, i) => s + Number(i.subtotal || 0), 0), [orderItems]);
 
   return (
-    <div style={{ minHeight: "100vh", background: "#f4f6f9" }}>
+    <div style={{ minHeight: "100vh", background: "linear-gradient(135deg,#eff6ff,#fdf2f8,#f0fdf4)" }}>
       <div
         style={{
           height: 64,
-          background: "#1e1e2f",
+          background: "#111827",
           color: "#fff",
           display: "flex",
           alignItems: "center",
@@ -443,7 +443,7 @@ export default function Sales() {
       </div>
 
       <div style={{ padding: 16, display: "grid", gridTemplateColumns: "1.1fr 1.4fr", gap: 14 }}>
-        <div style={{ background: "#fff", borderRadius: 16, padding: 14, boxShadow: "0 10px 25px rgba(0,0,0,0.06)" }}>
+        <div style={{ background: "#fff", borderRadius: 18, padding: 14, boxShadow: "0 10px 25px rgba(0,0,0,0.06)" }}>
           <div style={{ display: "flex", gap: 10, marginBottom: 10 }}>
             <button className="btn" onClick={() => setTab("quotes")}>Quotations</button>
             <button className="btn" onClick={() => setTab("orders")}>Sales Orders</button>
@@ -492,7 +492,7 @@ export default function Sales() {
           )}
         </div>
 
-        <div style={{ background: "#fff", borderRadius: 16, padding: 14, boxShadow: "0 10px 25px rgba(0,0,0,0.06)" }}>
+        <div style={{ background: "#fff", borderRadius: 18, padding: 14, boxShadow: "0 10px 25px rgba(0,0,0,0.06)" }}>
           {tab === "quotes" && quote && (
             <>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10 }}>
@@ -526,6 +526,9 @@ export default function Sales() {
                       <div style={{ fontSize: 12, opacity: 0.8 }}>
                         {i.qty} × {money(i.price)} = {money(i.subtotal)}
                       </div>
+                      <div style={{ fontSize: 12, opacity: 0.7 }}>
+                        Tax: {i.tax_type || "EXEMPT"} {Number(i.tax_rate || 0) > 0 ? `(${i.tax_rate}%)` : ""}
+                      </div>
                     </div>
                     <div style={{ fontSize: 12, opacity: 0.75 }}>{i.barcode || ""}</div>
                   </div>
@@ -534,6 +537,7 @@ export default function Sales() {
               </div>
 
               <div style={{ marginTop: 10, fontWeight: 950, fontSize: 18 }}>Total: KSh {money(quoteTotal)}</div>
+              <div style={{ marginTop: 4, fontSize: 13 }}>VAT: KSh {money(quoteVat)}</div>
             </>
           )}
 
@@ -569,6 +573,9 @@ export default function Sales() {
                       <div style={{ fontSize: 12, opacity: 0.8 }}>
                         {i.qty} × {money(i.price)} = {money(i.subtotal)}
                       </div>
+                      <div style={{ fontSize: 12, opacity: 0.7 }}>
+                        Tax: {i.tax_type || "EXEMPT"} {Number(i.tax_rate || 0) > 0 ? `(${i.tax_rate}%)` : ""}
+                      </div>
                     </div>
                     <div style={{ fontSize: 12, opacity: 0.75 }}>{i.barcode || ""}</div>
                   </div>
@@ -577,6 +584,7 @@ export default function Sales() {
               </div>
 
               <div style={{ marginTop: 10, fontWeight: 950, fontSize: 18 }}>Total: KSh {money(orderTotal)}</div>
+              <div style={{ marginTop: 4, fontSize: 13 }}>VAT: KSh {money(orderVat)}</div>
               <div style={{ marginTop: 6, fontSize: 12, opacity: 0.75 }}>
                 Rule: Stock reduces ONLY after Delivery Note. Invoice allowed only after Delivery.
               </div>
